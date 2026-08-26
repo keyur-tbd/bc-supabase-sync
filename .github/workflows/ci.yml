@@ -1,0 +1,100 @@
+name: CI
+
+# Secrets-free checks so a fork or PR gets a green tick without any
+# credentials. The real data sync lives in bc_sync.yml.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Byte-compile every module
+        run: python -m compileall -q app.py config.py services models utils scripts
+
+      - name: Import every module (no network, no DB)
+        env:
+          # config.py loads .env at import time and _require() raises when a
+          # BC var is missing, so give the import dummy values. Nothing here
+          # is used to connect anywhere.
+          BC_TENANT_ID: 00000000-0000-0000-0000-000000000000
+          BC_CLIENT_ID: 00000000-0000-0000-0000-000000000000
+          BC_CLIENT_SECRET: dummy
+          BC_ENVIRONMENT: Sandbox
+          BC_COMPANY_ID: Dummy Co
+          # Discrete vars rather than a DSN: exercises the non-SUPABASE_DB_URL
+          # branch of load_supabase_config(), and keeps the credential scan
+          # below from matching this workflow's own placeholder.
+          SUPABASE_DB_HOST: localhost
+          SUPABASE_DB_USER: postgres
+          SUPABASE_DB_PASSWORD: dummy
+        run: |
+          python - <<'PY'
+          import importlib
+          for m in ["config", "app", "models.sync_state", "services.auth_service",
+                    "services.bc_api_service", "services.supabase_service",
+                    "services.sync_service", "utils.logger", "utils.retry_helper",
+                    "utils.schema_helper", "utils.date_chunker"]:
+              importlib.import_module(m)
+              print("ok", m)
+          PY
+
+      - name: Validate config/web_services.json
+        run: |
+          python - <<'PY'
+          import json, sys
+          d = json.load(open("config/web_services.json", encoding="utf-8"))
+          services = d["services"]
+          assert services, "no services defined"
+          seen_names, seen_tables, problems = set(), set(), []
+          for s in services:
+              for key in ("name", "table_name", "primary_key"):
+                  if not s.get(key):
+                      problems.append(f"{s.get('name', '?')}: missing {key}")
+              if s["name"] in seen_names:
+                  problems.append(f"duplicate service name {s['name']}")
+              if s["table_name"] in seen_tables:
+                  problems.append(f"duplicate table_name {s['table_name']}")
+              seen_names.add(s["name"]); seen_tables.add(s["table_name"])
+              strategy = s.get("sync_strategy", "date")
+              if strategy not in ("date", "full_refresh"):
+                  problems.append(f"{s['name']}: unknown sync_strategy {strategy!r}")
+              if strategy == "date" and not (s.get("history_field") and s.get("incremental_field")):
+                  problems.append(f"{s['name']}: date strategy needs history_field + incremental_field")
+          if problems:
+              sys.exit("config problems:\n  " + "\n  ".join(problems))
+          print(f"{len(services)} service(s) valid")
+          PY
+
+      - name: Fail if a secret slipped into a tracked file
+        run: |
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "::error::.env is tracked by git"; exit 1
+          fi
+          # Real credential shapes only - the .env.example placeholders and
+          # the "*.pooler.supabase.com" prose in the docs must not trip this.
+          if git grep -nIE "(BC_CLIENT_SECRET|SUPABASE_DB_PASSWORD)[[:space:]]*=[[:space:]]*[^[:space:]$]|postgres(ql)?://[^[:space:]/]+:[^[:space:]@]+@" \
+               -- . ':!.env.example' ':!*.md' ':!test_supabase_port.py'; then
+            echo "::error::possible credential in a tracked file"; exit 1
+          fi
+          echo "no credentials found in tracked files"

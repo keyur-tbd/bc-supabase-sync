@@ -1,0 +1,59 @@
+name: Business Central -> Supabase Sync
+
+on:
+  schedule:
+    # Every 2 hours. Adjust to taste — incremental syncs are cheap since
+    # they only pull records changed since the last successful run.
+    - cron: "0 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Sync mode"
+        required: false
+        default: "incremental"
+        type: choice
+        options:
+          - incremental
+          - full
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # backfills are long; incremental runs finish quickly
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sync
+        env:
+          BC_CLIENT_ID: ${{ secrets.BC_CLIENT_ID }}
+          BC_CLIENT_SECRET: ${{ secrets.BC_CLIENT_SECRET }}
+          BC_TENANT_ID: ${{ secrets.BC_TENANT_ID }}
+          BC_ENVIRONMENT: ${{ secrets.BC_ENVIRONMENT }}
+          BC_COMPANY_ID: ${{ secrets.BC_COMPANY_ID }}
+          # Store the whole connection string as one secret. GitHub-hosted
+          # runners have dynamic egress IPs, so if you restrict network
+          # access on the Supabase side, use the pooler host rather than an
+          # IP allow-list.
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_DB_SCHEMA: ${{ vars.SUPABASE_DB_SCHEMA || 'public' }}
+          PG_LOWERCASE_COLUMNS: ${{ vars.PG_LOWERCASE_COLUMNS || 'false' }}
+        run: |
+          python app.py --mode ${{ github.event.inputs.mode || 'incremental' }}
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bc-sync-logs
+          path: logs/
+          retention-days: 14

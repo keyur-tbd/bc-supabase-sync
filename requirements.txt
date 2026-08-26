@@ -1,0 +1,16 @@
+# Pins are ranges rather than exact versions: the original exact pins were
+# inherited from the MySQL project and predate Python 3.13/3.14, so they
+# have no wheels for newer interpreters. Verified working on psycopg 3.3.4
+# and SQLAlchemy 2.0.52 (full test suite, 63/63).
+requests>=2.32.3,<3
+SQLAlchemy>=2.0.36,<2.1
+psycopg[binary]>=3.2.10,<3.4
+python-dotenv>=1.0.1,<2
+python-dateutil>=2.9.0,<3
+
+# Only used by scripts/generate_config_from_excel.py, which regenerates
+# config/web_services.json from the BC web-services spreadsheet. The sync
+# itself does not import them - drop these two lines if you never rerun
+# that script and want a lighter install.
+pandas>=2.2.3,<3
+openpyxl>=3.1.5,<4

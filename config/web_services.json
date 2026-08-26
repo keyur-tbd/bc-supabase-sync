@@ -1,0 +1,176 @@
+{
+  "_comment": "Per-service sync config. URLs built at runtime from .env. STRATEGY (sync_strategy): 'date' (default) = chunk historical backfill on history_field and run incremental on incremental_field \u2014 use when the table has a usable date; 'full_refresh' = re-pull the WHOLE table every run and upsert \u2014 use when the table has NO timestamp and no monotonic key (reference/lines tables); see _new_table_templates below. PRIMARY KEY (primary_key) may be a single name OR a list for a composite key \u2014 lines/detail tables MUST use a composite key (e.g. [Document_No, Line_No]) because the document number repeats across line rows. incremental_is_datetime=true if incremental_field is a datetime (e.g. SystemCreatedAt). lookback_days = trailing re-scan buffer for date incremental.",
+  "_new_table_templates": {
+    "table_with_a_date": {
+      "name": "Some_Header_Page_Excel",
+      "display_name": "Some Header",
+      "object_type": "Page",
+      "object_id": 0,
+      "table_name": "bc_some_header",
+      "primary_key": "No",
+      "sync_strategy": "date",
+      "history_field": "Posting_Date",
+      "incremental_field": "Posting_Date",
+      "incremental_is_datetime": false,
+      "chunk": "monthly",
+      "lookback_days": 7,
+      "sync_start_date": "2025-04-01",
+      "enabled": true
+    },
+    "table_without_any_timestamp": {
+      "name": "Some_Lines_Page_Excel",
+      "display_name": "Some Lines",
+      "object_type": "Page",
+      "object_id": 0,
+      "table_name": "bc_some_lines",
+      "primary_key": [
+        "Document_No",
+        "Line_No"
+      ],
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    }
+  },
+  "services": [
+    {
+      "name": "General_Ledger_Entries_Excel",
+      "display_name": "General Ledger Entries",
+      "object_type": "Page",
+      "object_id": 20,
+      "table_name": "bc_general_ledger_entries",
+      "primary_key": "Entry_No",
+      "sync_strategy": "date",
+      "history_field": "Posting_Date",
+      "incremental_field": "SystemCreatedAt",
+      "incremental_is_datetime": true,
+      "chunk": "monthly",
+      "lookback_days": 2,
+      "sync_start_date": "2025-04-01",
+      "enabled": true
+    },
+    {
+      "name": "Item_Ledger_Entries_Excel",
+      "display_name": "Item Ledger Entries",
+      "object_type": "Page",
+      "object_id": 38,
+      "table_name": "bc_item_ledger_entries",
+      "primary_key": "Entry_No",
+      "sync_strategy": "date",
+      "history_field": "Posting_Date",
+      "incremental_field": "Posting_Date",
+      "incremental_is_datetime": false,
+      "chunk": "monthly",
+      "lookback_days": 7,
+      "sync_start_date": "2025-04-01",
+      "enabled": true
+    },
+    {
+      "name": "Posted_Sales_Credit_Memo_Excel",
+      "display_name": "Posted Sales Credit Memo",
+      "object_type": "Page",
+      "object_id": 134,
+      "table_name": "bc_posted_sales_credit_memo",
+      "primary_key": "No",
+      "sync_strategy": "date",
+      "history_field": "Posting_Date",
+      "incremental_field": "Posting_Date",
+      "incremental_is_datetime": false,
+      "chunk": "monthly",
+      "lookback_days": 40,
+      "sync_start_date": "2025-04-01",
+      "enabled": true
+    },
+    {
+      "name": "Sales_Return_Order_Excel",
+      "display_name": "Sales Return Order",
+      "object_type": "Page",
+      "object_id": 6630,
+      "table_name": "bc_sales_return_order",
+      "primary_key": "No",
+      "sync_strategy": "date",
+      "history_field": "Document_Date",
+      "incremental_field": "Document_Date",
+      "incremental_is_datetime": false,
+      "chunk": "monthly",
+      "lookback_days": 40,
+      "sync_start_date": "2025-04-01",
+      "enabled": true
+    },
+      {
+    "_NOTE": "Sales lines subpage of Sales_Return_Order_Excel. Unposted -> mutable and bounded (open documents only), so full_refresh. PK follows the Posted_Sales_Credit_Memo_Lines evidence: Document_No + Line_No. VERIFY against a real record before the first run; if the page also exposes Document_Type, add it as a third key column to match BC's real Sales Line key.",
+    "name": "Sales_Return_Order_ExcelSalesLines",
+    "display_name": "Sales Return Order Lines",
+    "object_type": "Page",
+    "object_id": 6631,
+    "table_name": "bc_sales_return_order_lines",
+    "primary_key": ["Document_No", "Line_No"],
+    "sync_strategy": "full_refresh",
+    "enabled": true
+    },
+    {
+      "name": "Posted_Sales_Invoice_Excel",
+      "display_name": "Posted Sales Invoice",
+      "object_type": "Page",
+      "object_id": 132,
+      "table_name": "bc_posted_sales_invoice_excel",
+      "primary_key": "No",
+      "sync_strategy": "date",
+      "history_field": "Posting_Date",
+      "incremental_field": "Posting_Date",
+      "incremental_is_datetime": false,
+      "chunk": "monthly",
+      "lookback_days": 7,
+      "sync_start_date": "2025-04-01",
+      "enabled": true
+    },
+    {
+      "_NOTE": "No usable timestamp -> full_refresh. VERIFY the composite key against a real line record: on a line, 'No' is the item number; the unique key is Document_No + Line_No. If those exact field names differ, rows will land in quarantine/ (null key) until corrected.",
+      "name": "Posted_Sales_Credit_Memo_Lines_Excel",
+      "display_name": "Posted Sales Credit Memo Lines",
+      "object_type": "Page",
+      "object_id": 135,
+      "table_name": "bc_posted_sales_credit_memo_lines",
+      "primary_key": [
+        "Document_No.",
+        "No."
+      ],
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "_NOTE": "Custom page (50003). PRIMARY KEY IS A GUESS \u2014 confirm against a real record. If rows go to quarantine/ (null key), send a sample and I'll fix the key.",
+      "name": "Customer_Item_Reference_Excel",
+      "display_name": "Customer Item Reference",
+      "object_type": "Page",
+      "object_id": 50003,
+      "table_name": "bc_customer_item_reference",
+      "primary_key": [
+        "Ship To Code",
+        "Item No."
+      ],
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "_NOTE": "Ship-to Address (page 300). Standard key is Customer_No + Code; confirm the exact field names if rows quarantine.",
+      "name": "Ship_to_Address_Excel",
+      "display_name": "Ship-to Address",
+      "object_type": "Page",
+      "object_id": 300,
+      "table_name": "bc_ship_to_address",
+      "primary_key": "No",
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "name": "Requests_to_Approve_Excel",
+      "display_name": "Requests to Approve",
+      "object_type": "Page",
+      "object_id": 654,
+      "table_name": "bc_request_to_approve",
+      "primary_key": "No",
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    }
+  ]
+}

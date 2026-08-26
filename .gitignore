@@ -1,0 +1,39 @@
+# ---- secrets ----
+.env
+.env.local
+.test_dsn
+
+# ---- python ----
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- runtime output ----
+# Rotating handler appends a date suffix (sync.log.2026-08-24), which
+# "logs/*.log" alone does NOT match - and those files contain the tenant
+# GUID and company name in request URLs.
+logs/*
+!logs/.gitkeep
+failed_records/*
+!failed_records/.gitkeep
+quarantine/*
+!quarantine/.gitkeep
+
+# ---- test scratch ----
+pgdata_test/
+
+# ---- source data / exports (large, tenant-specific) ----
+*.xlsx
+*.csv
+
+# ---- editors / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

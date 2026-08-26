@@ -1,0 +1,7 @@
+# Normalize to LF in the repo. The sync runs on ubuntu-latest in Actions,
+# so CRLF committed from a Windows dev box would otherwise leak into shell
+# heredocs and the .crt bundle.
+* text=auto eol=lf
+*.crt text eol=lf
+*.png binary
+*.xlsx binary
