@@ -56,6 +56,7 @@ from utils.schema_helper import (
     SYNCED_AT_COL,
     build_create_table_sql,
     infer_schema,
+    normalize_column_name,
     normalize_pk,
     qualified_table,
     quote_ident,
@@ -333,6 +334,36 @@ class SupabaseService:
                         )
                     )
             self._json_columns.pop(table_name, None)
+
+    def max_by_series(self, table_name: str, column: str, separator: str = "-") -> dict[str, str]:
+        """{series_prefix: highest value seen} for `column`, where the prefix
+        is everything before the first `separator` (e.g. 26CNMUM-21208 ->
+        26CNMUM). Drives the series_key strategy's per-series watermark.
+
+        Relies on the numeric part being zero-padded to a constant width
+        within a series, which is how BC no.-series work - otherwise a
+        lexicographic max would not be the numeric max.
+        Returns {} when the table does not exist yet.
+        """
+        col = normalize_column_name(column)
+        if not self._existing_columns(table_name):
+            return {}
+        sql = text(
+            f"SELECT split_part({quote_ident(col)}, :sep, 1) AS series, "
+            f"MAX({quote_ident(col)}) AS high "
+            f"FROM {qualified_table(self._schema, table_name)} "
+            f"WHERE {quote_ident(col)} IS NOT NULL AND {quote_ident(col)} <> '' "
+            f"GROUP BY 1"
+        )
+        with self._engine.connect() as conn:
+            return {r[0]: r[1] for r in conn.execute(sql, {"sep": separator}).fetchall() if r[0]}
+
+    def distinct_series(self, table_name: str, column: str, separator: str = "-") -> set[str]:
+        """Series prefixes present in `table_name`.`column`. Used to spot a
+        series that exists on the parent document table but has no lines
+        stored yet - BC rejects a "not (...)" filter, so a brand-new series
+        cannot be discovered from the API side."""
+        return set(self.max_by_series(table_name, column, separator).keys())
 
     # ---------- upserts ----------
 

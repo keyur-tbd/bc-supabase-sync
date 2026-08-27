@@ -55,6 +55,11 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
 
 
+def _odata_str(value: str) -> str:
+    """Single-quoted OData string literal; an embedded quote is doubled."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 def _parse_date(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
 
@@ -112,7 +117,14 @@ class SyncService:
         quarantine_invalid = bool(service.get("quarantine_missing_pk", True))
 
         try:
-            if strategy == "full_refresh":
+            if strategy == "series_key":
+                # No date field on the page at all, but the business key is a
+                # BC no.-series (26CNMUM-00001 ...) that only ever grows.
+                processed, failed = self._run_series_key(
+                    service, state, stats, name, table_name, primary_key, mode,
+                    quarantine_invalid=quarantine_invalid,
+                )
+            elif strategy == "full_refresh":
                 # No usable timestamp/key on this table: re-pull everything
                 # every run. mode is irrelevant here.
                 processed, failed = self._run_full_refresh(
@@ -235,6 +247,73 @@ class SyncService:
             self._db.save_resume_point(name, next_url, total_processed)
 
         return total_processed, total_failed
+
+    def _run_series_key(
+        self, service, state, stats, name, table_name, primary_key, mode,
+        quarantine_invalid: bool = True,
+    ) -> tuple[int, int]:
+        """For pages with no date field whose key is a BC no.-series.
+
+        Posted documents are immutable and their numbers only ever increase
+        within a series, so "everything above the highest number already
+        stored" is a complete and correct incremental window.
+
+        One request per series, because BC rejects an OR of AND-groups with
+        501 BadRequest_MethodNotImplemented - the whole thing cannot be
+        expressed as a single filter. It also rejects "not (...)", so a
+        brand-new series cannot be discovered from the API; series_source
+        names a parent table (synced by date) to learn them from instead.
+
+        The watermark is re-derived from the stored data on every run, so an
+        interrupted run resumes correctly with no bookkeeping - provided
+        pages arrive in ascending key order, which is why $orderby is sent.
+        """
+        field = service.get("series_key_field", "Document_No")
+        sep = service.get("series_separator", "-")
+        src = service.get("series_source") or {}
+
+        highs = self._db.max_by_series(table_name, field, sep)
+
+        # First ever run, or an explicit --mode full: take the lot, unfiltered.
+        if mode == "full" or not highs:
+            why = "--mode full" if mode == "full" else "no rows stored yet"
+            logger.info(f"[{name}] Series-key: full pull ({why}).")
+            total_p = total_f = 0
+            for records, next_url in self._api.fetch_pages(name, order_by=field):
+                p, f = self._process_page(name, table_name, primary_key, None, records, stats,
+                                          quarantine_invalid=quarantine_invalid)
+                total_p += p
+                total_f += f
+                self._db.save_resume_point(name, next_url, total_p)
+            return total_p, total_f
+
+        series = set(highs)
+        if src.get("table") and src.get("column"):
+            discovered = self._db.distinct_series(src["table"], src["column"], sep)
+            new = discovered - series
+            if new:
+                logger.info(f"[{name}] Series-key: {len(new)} new series from "
+                            f"{src['table']}: {sorted(new)}")
+            series |= discovered
+
+        logger.info(f"[{name}] Series-key on {field}: {len(series)} series, "
+                    f"one request each, above each series' stored maximum.")
+        total_p = total_f = 0
+        for s in sorted(series):
+            high = highs.get(s)
+            prefix = _odata_str(s)
+            odata_filter = f"startswith({field},{prefix})"
+            if high:
+                odata_filter += f" and {field} gt {_odata_str(high)}"
+            for records, next_url in self._api.fetch_pages(
+                name, odata_filter=odata_filter, order_by=field
+            ):
+                p, f = self._process_page(name, table_name, primary_key, None, records, stats,
+                                          quarantine_invalid=quarantine_invalid)
+                total_p += p
+                total_f += f
+                self._db.save_resume_point(name, next_url, total_p)
+        return total_p, total_f
 
     def _run_full_refresh(self, state, stats, name, table_name, primary_key,
                           quarantine_invalid: bool = True) -> tuple[int, int]:

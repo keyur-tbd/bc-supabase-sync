@@ -30,15 +30,24 @@ class BCApiService:
         self._auth = auth_service
         self._session = requests.Session()
 
-    def build_initial_url(self, service_name: str, odata_filter: str | None = None) -> str:
+    def build_initial_url(self, service_name: str, odata_filter: str | None = None,
+                          order_by: str | None = None) -> str:
         # NOTE: no $top here, on purpose. $top makes BC cap the result and
         # stop emitting @odata.nextLink, which silently truncates large
         # pulls. Page size is bounded instead via the `Prefer:
         # odata.maxpagesize` header (see _get_page), which keeps pagination
         # working across the full dataset.
         url = f"{self._config.odata_base_url()}/{service_name}"
+        params = []
         if odata_filter:
-            url += f"?$filter={odata_filter}"
+            params.append(f"$filter={odata_filter}")
+        # $orderby matters for the series_key strategy: its watermark is the
+        # highest key already stored, so pages must arrive in ascending key
+        # order for an interrupted run to resume without skipping documents.
+        if order_by:
+            params.append(f"$orderby={order_by}")
+        if params:
+            url += "?" + "&".join(params)
         return url
 
     @retry_with_backoff(max_attempts=5, base_delay=2.0)
@@ -83,6 +92,7 @@ class BCApiService:
         service_name: str,
         odata_filter: str | None = None,
         resume_url: str | None = None,
+        order_by: str | None = None,
     ) -> Iterator[tuple[list[dict], str | None]]:
         """
         Yields (records, next_url) tuples, one per page. `next_url` is None
@@ -90,7 +100,7 @@ class BCApiService:
         successfully processing each page so a crashed run can resume from
         the exact same point via `resume_url`.
         """
-        url = resume_url or self.build_initial_url(service_name, odata_filter)
+        url = resume_url or self.build_initial_url(service_name, odata_filter, order_by)
         page_num = 0
         while url:
             page_num += 1

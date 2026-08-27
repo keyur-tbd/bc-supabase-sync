@@ -266,6 +266,39 @@ lossy even if a column's inferred type ends up too narrow for an edge
 case.
 
 
+## Tables keyed by a BC no.-series (`series_key`)
+
+Some pages expose no date field at all, but their key is a BC number series
+(`26CNMUM-00001`, `26CNMUM-00002`, ...). For posted — therefore immutable —
+documents, "everything above the highest number already stored" is a complete
+and correct incremental window, so those tables do not need `full_refresh`:
+
+``` json
+"sync_strategy": "series_key",
+"series_key_field": "Document_No",
+"series_separator": "-",
+"series_source": { "table": "bc_posted_sales_credit_memo", "column": "No" }
+```
+
+The watermark is re-derived from the stored data on every run — nothing is
+persisted — so an interrupted run resumes with no bookkeeping. That relies on
+pages arriving in ascending key order, which is why `$orderby` is sent.
+
+Two BC limits shape the design, both verified against the live API:
+
+-   **One request per series.** BC answers `501
+    BadRequest_MethodNotImplemented` to an OR of AND-groups, so the whole
+    sweep cannot be a single filter. Each series gets
+    `startswith(Field,'PREFIX') and Field gt '<max>'`, which BC accepts.
+-   **New series cannot be discovered from the API.** BC also rejects
+    `not (...)` — *"Client requests that contain 'Not' filter options are not
+    supported"* — so there is no way to ask for "anything outside the series
+    I know". `series_source` names the parent document table (which syncs by
+    date) and any series present there but absent locally is pulled in full.
+
+On `--mode full`, or when the table is still empty, it falls back to an
+unfiltered pull.
+
 ## Tables without a usable timestamp
 
 Some pages (often lines/detail tables) expose no date or modified field to
