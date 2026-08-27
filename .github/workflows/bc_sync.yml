@@ -55,6 +55,12 @@ jobs:
           SUPABASE_DB_SSLROOTCERT: ${{ github.workspace }}/prod-ca-2021.crt
           SUPABASE_DB_SSLMODE: verify-full
           PG_LOWERCASE_COLUMNS: ${{ vars.PG_LOWERCASE_COLUMNS || 'false' }}
+          # _raw_json duplicates every field the typed columns already hold.
+          # At ~1KB/row it was 90% of the GL table's on-disk size and drove the
+          # database to 6.3GB. Excluded on the two high-volume tables; the
+          # small ones keep it as a debugging safety net.
+          SUPABASE_RAW_JSON_EXCLUDE_TABLES: >-
+            ${{ vars.SUPABASE_RAW_JSON_EXCLUDE_TABLES || 'bc_general_ledger_entries,bc_item_ledger_entries' }}
         run: |
           python app.py --mode ${{ github.event.inputs.mode || 'incremental' }}
 

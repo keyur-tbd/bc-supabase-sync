@@ -104,6 +104,16 @@ class SupabaseService:
         self._ensure_schema_exists()
         self._ensure_sync_state_table()
 
+    def _stores_raw_json(self, table_name: str) -> bool:
+        """Whether `table_name` carries the _raw_json copy of the source record.
+
+        Excluded tables skip it entirely: the column is not created, not
+        referenced in the INSERT column list, and not populated. It duplicates
+        data the typed columns already hold and dominates on-disk size once a
+        table reaches millions of rows.
+        """
+        return table_name not in self._config.raw_json_exclude_tables
+
     # ---------- connectivity / setup ----------
 
     def _install_session_settings(self) -> None:
@@ -265,14 +275,15 @@ class SupabaseService:
         pk_cols = normalize_pk(primary_key)
 
         if not existing_cols:
-            ddl = build_create_table_sql(self._schema, table_name, inferred, primary_key)
+            store_raw = self._stores_raw_json(table_name)
+            ddl = build_create_table_sql(
+                self._schema, table_name, inferred, primary_key, store_raw_json=store_raw
+            )
             logger.info(f"Creating table {self._schema}.{table_name}...")
             with self._engine.begin() as conn:
                 conn.execute(text(ddl))
-            self._known_columns[table_name] = set(inferred.keys()) | set(pk_cols) | {
-                SYNCED_AT_COL,
-                RAW_JSON_COL,
-            }
+            bookkeeping = {SYNCED_AT_COL} | ({RAW_JSON_COL} if store_raw else set())
+            self._known_columns[table_name] = set(inferred.keys()) | set(pk_cols) | bookkeeping
             self._json_columns.pop(table_name, None)
             self._enable_rls(table_name)
             return inferred
@@ -374,7 +385,12 @@ class SupabaseService:
         if not valid_rows:
             return 0, failed
 
-        all_cols = sorted({c for row in valid_rows for c in row.keys()} | set(pk_cols) | {RAW_JSON_COL})
+        store_raw = self._stores_raw_json(table_name)
+        all_cols = sorted(
+            {c for row in valid_rows for c in row.keys()}
+            | set(pk_cols)
+            | ({RAW_JSON_COL} if store_raw else set())
+        )
         json_cols = self._jsonb_columns(table_name)
         succeeded = 0
         for start in range(0, len(valid_rows), batch_size):
@@ -403,7 +419,7 @@ class SupabaseService:
         prepared = []
         for i, row in enumerate(batch):
             full_row = {col: row.get(col) for col in all_cols}
-            if i < len(raw_batch) and raw_batch[i] is not None:
+            if RAW_JSON_COL in all_cols and i < len(raw_batch) and raw_batch[i] is not None:
                 full_row[RAW_JSON_COL] = json.dumps(raw_batch[i], default=str)
             # PK columns are TEXT; Postgres will not implicitly cast an int
             # parameter into a text column the way MySQL did, so coerce here.

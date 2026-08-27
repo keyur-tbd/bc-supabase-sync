@@ -60,6 +60,15 @@ BC):
     process crashes or a GitHub Actions job times out mid-pull, the next
     run resumes from that exact page instead of starting over or
     skipping records.
+-   **`_raw_json` sizing**: by default each table also stores the complete
+    source record as JSONB. That is a genuine safety net at small scale, but
+    it duplicates every field the typed columns already hold and runs about
+    1 KB per row — roughly **90% of a wide row's on-disk size**. On the GL
+    table it alone took the database past 6 GB. List high-volume tables in
+    `SUPABASE_RAW_JSON_EXCLUDE_TABLES` to skip it; small tables keep it.
+    **Order matters** when turning it off for a table that already exists:
+    deploy the setting first, *then* drop the column. Dropping first makes
+    every upsert fail, because the INSERT still names the column.
 -   **Schema**: tables are created automatically from the shape of the
     data. New fields are added as new columns, and existing `VARCHAR`
     columns are **widened** when a longer value appears — columns are

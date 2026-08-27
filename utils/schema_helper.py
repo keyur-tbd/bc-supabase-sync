@@ -260,7 +260,8 @@ def infer_schema(rows: list[dict], json_columns: set[str] | None = None) -> dict
     return schema
 
 
-def build_create_table_sql(schema: str, table_name: str, columns: dict[str, str], primary_key) -> str:
+def build_create_table_sql(schema: str, table_name: str, columns: dict[str, str], primary_key,
+                          store_raw_json: bool = True) -> str:
     """Builds a CREATE TABLE IF NOT EXISTS statement. Primary-key column(s)
     are forced to TEXT NOT NULL regardless of inferred type, so a key is
     always reliably indexable and never rejects an over-long value.
@@ -293,7 +294,8 @@ def build_create_table_sql(schema: str, table_name: str, columns: dict[str, str]
     # "ON UPDATE CURRENT_TIMESTAMP", so _synced_at is refreshed explicitly
     # in the upsert's DO UPDATE clause rather than by the column default.
     col_defs.append(f"{quote_ident(SYNCED_AT_COL)} TIMESTAMPTZ NOT NULL DEFAULT now()")
-    col_defs.append(f"{quote_ident(RAW_JSON_COL)} JSONB")
+    if store_raw_json:
+        col_defs.append(f"{quote_ident(RAW_JSON_COL)} JSONB")
 
     cols_sql = ",\n  ".join(col_defs)
     pk_clause = ", ".join(quote_ident(c) for c in pk_cols)

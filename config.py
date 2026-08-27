@@ -98,6 +98,12 @@ class SupabaseConfig:
     sslmode: str = "require"  # Supabase requires TLS
     sslrootcert: str = ""    # path to a CA bundle, or the literal "system"
     statement_timeout_ms: int = 0   # 0 = no client-imposed limit
+    # Tables that should NOT carry the _raw_json copy of the source record.
+    # That column duplicates every field the typed columns already hold; at
+    # ~1KB/row it is ~90% of a wide table's on-disk size, which is fine for
+    # thousands of rows and ruinous for millions. Exclude the high-volume
+    # tables here and keep the safety net on the small ones.
+    raw_json_exclude_tables: frozenset = frozenset()
     enable_rls: bool = True   # ENABLE ROW LEVEL SECURITY on tables we create
     use_pooler: bool = True   # disable prepared statements (PgBouncer-safe)
     pool_size: int = 5
@@ -199,6 +205,9 @@ def load_supabase_config() -> SupabaseConfig:
         sslmode=sslmode,
         sslrootcert=sslrootcert,
         statement_timeout_ms=int(_optional("SUPABASE_STATEMENT_TIMEOUT_MS", "0")),
+        raw_json_exclude_tables=frozenset(
+            n.strip() for n in _optional("SUPABASE_RAW_JSON_EXCLUDE_TABLES", "").split(",") if n.strip()
+        ),
         enable_rls=_optional("SUPABASE_ENABLE_RLS", "true").lower() != "false",
         use_pooler=_optional("SUPABASE_USE_POOLER", "true").lower() != "false",
         pool_size=int(_optional("SUPABASE_POOL_SIZE", "5")),
