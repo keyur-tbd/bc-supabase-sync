@@ -97,3 +97,25 @@ def build_range_filter(
     if upper is not None:
         clauses.append(f"{field} lt {_literal(upper, is_datetime)}")
     return " and ".join(clauses) if clauses else None
+
+
+# BC writes an unset Edm.Date as 0001-01-01 rather than null. Such rows sit
+# below every "ge <floor>" window forever, so an incremental sync keyed on a
+# business date would never see them - not just stale, but never fetched at
+# all for rows created undated. Services that expect them opt in via
+# "incremental_include_undated": true in web_services.json.
+BLANK_DATE_SENTINEL = "0001-01-01"
+
+
+def build_incremental_filter(
+    field: str,
+    floor: DateLike,
+    is_datetime: bool = False,
+    include_undated: bool = False,
+) -> str | None:
+    """``field ge <floor>``, optionally widened to also match rows whose date
+    is BC's blank-date sentinel (0001-01-01)."""
+    base = build_range_filter(field, floor, None, is_datetime=is_datetime)
+    if not base or not include_undated:
+        return base
+    return f"({base} or {field} eq {BLANK_DATE_SENTINEL})"

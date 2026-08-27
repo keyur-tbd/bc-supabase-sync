@@ -37,7 +37,7 @@ from models.sync_state import SyncState
 from services.auth_service import BCAuthService
 from services.bc_api_service import BCApiService
 from services.supabase_service import SupabaseService
-from utils.date_chunker import build_range_filter, iter_windows
+from utils.date_chunker import build_incremental_filter, build_range_filter, iter_windows
 from utils.logger import SyncStats
 from utils.retry_helper import NonRetryableError
 from utils.schema_helper import normalize_column_name, normalize_pk, prepare_row
@@ -202,13 +202,16 @@ class SyncService:
         floor = watermark - timedelta(days=lookback_days)
         if not incremental_is_datetime:
             floor = floor.date() if isinstance(floor, datetime) else floor
-        odata_filter = build_range_filter(
-            incremental_field, floor, None, is_datetime=incremental_is_datetime
+        include_undated = bool(service.get("incremental_include_undated", False))
+        odata_filter = build_incremental_filter(
+            incremental_field, floor, is_datetime=incremental_is_datetime,
+            include_undated=include_undated,
         )
         resume_url = state.resume_url if state.has_incomplete_run else None
         logger.info(
             f"[{name}] Incremental on {incremental_field} ge {floor} "
-            f"(watermark {watermark}, lookback {lookback_days}d)."
+            f"(watermark {watermark}, lookback {lookback_days}d"
+            + (", incl. undated" if include_undated else "") + ")."
         )
 
         total_processed = 0

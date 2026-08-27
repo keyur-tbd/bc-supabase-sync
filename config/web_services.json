@@ -1,5 +1,5 @@
 {
-  "_comment": "Per-service sync config. URLs built at runtime from .env. STRATEGY (sync_strategy): 'date' (default) = chunk historical backfill on history_field and run incremental on incremental_field \u2014 use when the table has a usable date; 'full_refresh' = re-pull the WHOLE table every run and upsert \u2014 use when the table has NO timestamp and no monotonic key (reference/lines tables); see _new_table_templates below. PRIMARY KEY (primary_key) may be a single name OR a list for a composite key \u2014 lines/detail tables MUST use a composite key (e.g. [Document_No, Line_No]) because the document number repeats across line rows. incremental_is_datetime=true if incremental_field is a datetime (e.g. SystemCreatedAt). lookback_days = trailing re-scan buffer for date incremental.",
+  "_comment": "Per-service sync config. URLs built at runtime from .env. STRATEGY (sync_strategy): 'date' (default) = chunk historical backfill on history_field and run incremental on incremental_field — use when the table has a usable date; 'full_refresh' = re-pull the WHOLE table every run and upsert — use when the table has NO timestamp and no monotonic key (reference/lines tables); see _new_table_templates below. PRIMARY KEY (primary_key) may be a single name OR a list for a composite key — lines/detail tables MUST use a composite key (e.g. [Document_No, Line_No]) because the document number repeats across line rows. incremental_is_datetime=true if incremental_field is a datetime (e.g. SystemCreatedAt). lookback_days = trailing re-scan buffer for date incremental.",
   "_new_table_templates": {
     "table_with_a_date": {
       "name": "Some_Header_Page_Excel",
@@ -96,16 +96,26 @@
       "sync_start_date": "2025-04-01",
       "enabled": true
     },
-      {
-    "_NOTE": "Sales lines subpage of Sales_Return_Order_Excel. Unposted -> mutable and bounded (open documents only), so full_refresh. PK follows the Posted_Sales_Credit_Memo_Lines evidence: Document_No + Line_No. VERIFY against a real record before the first run; if the page also exposes Document_Type, add it as a third key column to match BC's real Sales Line key.",
-    "name": "Sales_Return_Order_ExcelSalesLines",
-    "display_name": "Sales Return Order Lines",
-    "object_type": "Page",
-    "object_id": 6631,
-    "table_name": "bc_sales_return_order_lines",
-    "primary_key": ["Document_No", "Line_No"],
-    "sync_strategy": "full_refresh",
-    "enabled": true
+    {
+      "_NOTE": "Sales lines subpage of Sales_Return_Order_Excel. Unposted -> mutable. Switched from full_refresh to date-incremental on Shipment_Date: full_refresh re-upserted all 305k rows every 2h, which churned ~3.7M dead tuples/day and took the table from 206MB to 456MB. Shipment_Date is the only populated date this page exposes (no Document_Date, no SystemCreatedAt/ModifiedAt). TRADE-OFF: edits to lines shipped longer ago than lookback_days are no longer picked up; a 90d window covers ~10% of rows per run instead of 100%. Deletions were never propagated under full_refresh either (it only ever upserts), so nothing is lost there. incremental_include_undated keeps BC's 0001-01-01 blank-date lines reachable - ~11.4k rows that a bare 'ge' filter would never fetch.",
+      "name": "Sales_Return_Order_ExcelSalesLines",
+      "display_name": "Sales Return Order Lines",
+      "object_type": "Page",
+      "object_id": 6631,
+      "table_name": "bc_sales_return_order_lines",
+      "primary_key": [
+        "Document_No",
+        "Line_No"
+      ],
+      "sync_strategy": "date",
+      "enabled": true,
+      "history_field": "Shipment_Date",
+      "incremental_field": "Shipment_Date",
+      "incremental_is_datetime": false,
+      "incremental_include_undated": true,
+      "chunk": "monthly",
+      "lookback_days": 90,
+      "sync_start_date": "2024-04-01"
     },
     {
       "name": "Posted_Sales_Invoice_Excel",
@@ -138,7 +148,7 @@
       "enabled": true
     },
     {
-      "_NOTE": "Custom page (50003). PRIMARY KEY IS A GUESS \u2014 confirm against a real record. If rows go to quarantine/ (null key), send a sample and I'll fix the key.",
+      "_NOTE": "Custom page (50003). PRIMARY KEY IS A GUESS — confirm against a real record. If rows go to quarantine/ (null key), send a sample and I'll fix the key.",
       "name": "Customer_Item_Reference_Excel",
       "display_name": "Customer Item Reference",
       "object_type": "Page",

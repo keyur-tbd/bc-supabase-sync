@@ -268,6 +268,21 @@ is re-pulled every run and upserted (correct for both append-only and
 mutable tables; cost scales with size, so best for small/medium tables).
 Tables that *do* have a date keep the default `"sync_strategy": "date"`.
 
+`full_refresh` only ever **upserts** — it never deletes. A row for a document
+that has since been posted or deleted in BC stays in Supabase either way, so
+switching such a table to incremental costs nothing in that respect. What it
+does cost is edits: full_refresh re-reads every row every run, so any change
+anywhere is caught, whereas incremental only revisits rows inside
+`lookback_days`. `Sales_Return_Order_ExcelSalesLines` was moved to
+date-incremental on `Shipment_Date` for exactly this trade — re-upserting all
+305k lines every 2 hours churned ~3.7M dead tuples a day and grew the table
+from 206 MB to 456 MB.
+
+BC writes an unset date as `0001-01-01`, not null, so those rows sit below
+every `ge <floor>` window and an incremental sync would never fetch them. Set
+`"incremental_include_undated": true` to widen the filter to
+`(field ge <floor> or field eq 0001-01-01)`.
+
 Lines/detail tables also need a **composite primary key**, e.g.
 `"primary_key": ["Document_No", "Line_No"]` — the document number alone
 repeats across line rows, so a single-column key would overwrite lines.
