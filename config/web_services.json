@@ -259,6 +259,26 @@
       "primary_key": "id",
       "sync_strategy": "full_refresh",
       "enabled": true
+    },
+    {
+      "_NOTE": "Vendor Ledger Entries (page 29). ~36k rows, all from 2024-04-01 onwards. Same shape as Customer_Ledger_Entries_Excel: mutable after posting (Open / Remaining_Amount / Closed_at_Date), no SystemCreatedAt -> Posting_Date lookback plus an extra pass on Closed_at_Date.",
+      "name": "Vendor_Ledger_Entries_Excel",
+      "display_name": "Vendor Ledger Entries",
+      "object_type": "Page",
+      "object_id": 29,
+      "table_name": "bc_vendor_ledger_entries",
+      "primary_key": "Entry_No",
+      "sync_strategy": "date",
+      "history_field": "Posting_Date",
+      "incremental_field": "Posting_Date",
+      "incremental_is_datetime": false,
+      "incremental_extra_fields": [
+        "Closed_at_Date"
+      ],
+      "chunk": "monthly",
+      "lookback_days": 30,
+      "sync_start_date": "2024-04-01",
+      "enabled": true
     }
   ]
 }

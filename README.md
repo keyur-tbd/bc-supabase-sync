@@ -25,6 +25,7 @@ BC):
 | `Customer_Ledger_Entries_Excel` | `bc_customer_ledger_entries` | date | `Posting_Date` | `Posting_Date` + extra pass on `Closed_at_Date` |
 | `G_L_Account_Card_Excel` | `bc_gl_account_card` | full_refresh | — | — |
 | `customers` (**API v2.0**) | `bc_api_customers` | full_refresh | — | — |
+| `Vendor_Ledger_Entries_Excel` | `bc_vendor_ledger_entries` | date | `Posting_Date` | `Posting_Date` + extra pass on `Closed_at_Date` |
 
 > Sales Return Order is an open (un-posted) document, so it has no posting
 > date — it is chunked/incremented on `Document_Date` instead. GL uses
@@ -331,7 +332,7 @@ applied months later, well outside any `Posting_Date` lookback. BC rejects
 `A ge x or B ge x` across two different fields (501), so list the extra
 date fields under `incremental_extra_fields`; each gets its own pass with
 the same floor and the rows are upserted on top. `Customer_Ledger_Entries_Excel`
-uses this with `Closed_at_Date`.
+and `Vendor_Ledger_Entries_Excel` use this with `Closed_at_Date`.
 
 ## Tables without a usable timestamp
 
