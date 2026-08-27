@@ -83,10 +83,12 @@ BC):
 
 ## Project structure
 
-```         
+```
 bc_supabase_sync/
 ├── app.py                          # CLI entry point
 ├── config.py                       # env var loading + validation
+├── diagnose_connection.py          # works out which SSL settings connect
+├── test_supabase_port.py           # integration suite (needs TEST_PG_DSN)
 ├── requirements.txt
 ├── .env.example
 ├── config/
@@ -103,10 +105,14 @@ bc_supabase_sync/
 ├── utils/
 │   ├── logger.py
 │   ├── retry_helper.py
-│   └── schema_helper.py
-├── logs/                           # rotating daily log files + JSON run summaries
-├── failed_records/                 # JSON dumps of any batch that failed to upsert
-└── .github/workflows/bc_sync.yml   # scheduled GitHub Actions run
+│   ├── schema_helper.py
+│   └── date_chunker.py
+├── logs/                           # rotating daily log files + JSON run summaries (gitignored)
+├── failed_records/                 # JSON dumps of any batch that failed to upsert (gitignored)
+├── quarantine/                     # rows rejected or flagged by validation (gitignored)
+└── .github/workflows/
+    ├── bc_sync.yml                 # scheduled sync (needs repo secrets)
+    └── ci.yml                      # secrets-free compile/import/config checks
 ```
 
 ## Setup
@@ -197,6 +203,29 @@ If you'd rather run it as a long-lived process instead of CI cron, wrap
 `SyncService.run()` in your own loop (e.g. with `schedule` or
 `APScheduler`) — `app.py` deliberately stays single-shot so it behaves
 identically whether invoked by cron, GitHub Actions, or by hand.
+
+## Running the tests
+
+`test_supabase_port.py` is an integration suite covering every DB code path
+(type inference, schema drift, composite keys, quarantine, batching, sync
+state). It needs a real Postgres, supplied via `TEST_PG_DSN`. Everything it
+creates lives in two throwaway schemas (`bc_port_test`, `bc_port_test_alt`)
+which are dropped at the end, so pointing it at a live Supabase project does
+not touch `public` or any `bc_*` table.
+
+``` powershell
+$env:TEST_PG_DSN = "postgresql://postgres.<ref>:<password>@<host>:5432/postgres?sslmode=verify-full&sslrootcert=<path-to>/prod-ca-2021.crt"
+python test_supabase_port.py
+```
+
+On Linux/macOS you can instead `pip install pgserver` and run it with no
+`TEST_PG_DSN` — it spins up a disposable local Postgres. There is no
+Windows build of `pgserver`, so Windows needs `TEST_PG_DSN`.
+
+CI (`.github/workflows/ci.yml`) deliberately does **not** run this suite —
+it has no database and no secrets. It compiles and imports every module on
+Python 3.12/3.13, validates `config/web_services.json`, and fails if a
+credential ever lands in a tracked file.
 
 ## Monitoring
 
