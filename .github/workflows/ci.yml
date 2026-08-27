@@ -77,10 +77,19 @@ jobs:
                   problems.append(f"duplicate table_name {s['table_name']}")
               seen_names.add(s["name"]); seen_tables.add(s["table_name"])
               strategy = s.get("sync_strategy", "date")
-              if strategy not in ("date", "full_refresh"):
+              if strategy not in ("date", "full_refresh", "series_key"):
                   problems.append(f"{s['name']}: unknown sync_strategy {strategy!r}")
               if strategy == "date" and not (s.get("history_field") and s.get("incremental_field")):
                   problems.append(f"{s['name']}: date strategy needs history_field + incremental_field")
+              if strategy == "series_key":
+                  if not s.get("series_key_field"):
+                      problems.append(f"{s['name']}: series_key strategy needs series_key_field")
+                  src = s.get("series_source") or {}
+                  if src and not (src.get("table") and src.get("column")):
+                      problems.append(f"{s['name']}: series_source needs both table and column")
+              # A composite primary key must be a list, not a bare string.
+              if isinstance(s.get("primary_key"), list) and not s["primary_key"]:
+                  problems.append(f"{s['name']}: primary_key list is empty")
           if problems:
               sys.exit("config problems:\n  " + "\n  ".join(problems))
           print(f"{len(services)} service(s) valid")
