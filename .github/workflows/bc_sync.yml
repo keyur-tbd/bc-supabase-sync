@@ -16,6 +16,15 @@ on:
           - incremental
           - full
 
+# A backfill can outlast the 2-hourly cron. Without this, the next tick starts
+# a second sync that races the first on etl_sync_state and, worse, on the
+# stored resume_url - two runs saving different next-page links for the same
+# service corrupts the resume point. Queue instead of overlapping; never
+# cancel a run mid-page.
+concurrency:
+  group: bc-sync
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
