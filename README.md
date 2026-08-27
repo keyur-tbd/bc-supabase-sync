@@ -79,6 +79,12 @@ BC):
     `quarantine/` and skipped (they can't be upserted); rows whose date
     field is implausibly in the future are copied to `quarantine/` for
     review but still stored, so nothing is lost.
+    Where keyless rows are *expected* rather than surprising — e.g. credit
+    memo lines carrying no product — set `"quarantine_missing_pk": false`
+    on that service. They are then dropped quietly: not written to
+    `quarantine/`, not counted as failures (so the run ends `success`
+    rather than `partial_failure`), but still reported as `skipped=N` in
+    the log line and the run summary JSON.
 -   **PK guard**: at the start of each service the table's actual primary
     key is compared to the configured one; a mismatch is logged loudly
     (editing config alone never migrates an existing table's key).

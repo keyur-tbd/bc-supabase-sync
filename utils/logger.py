@@ -64,6 +64,7 @@ class SyncStats:
     inserted: int = 0
     updated: int = 0
     failed: int = 0
+    skipped: int = 0   # dropped, not errors (e.g. keyless rows)
     pages_fetched: int = 0
     error_message: str | None = None
     status: str = "in_progress"  # in_progress | success | partial_failure | failed
@@ -86,6 +87,7 @@ class SyncStats:
             "inserted": self.inserted,
             "updated": self.updated,
             "failed": self.failed,
+            "skipped": self.skipped,
             "pages_fetched": self.pages_fetched,
             "duration_seconds": self.duration_seconds,
             "error_message": self.error_message,
@@ -95,7 +97,7 @@ class SyncStats:
         return (
             f"[{self.service_name}] status={self.status} "
             f"fetched={self.fetched} inserted={self.inserted} updated={self.updated} "
-            f"failed={self.failed} pages={self.pages_fetched} "
+            f"failed={self.failed} skipped={self.skipped} pages={self.pages_fetched} "
             f"duration={self.duration_seconds}s"
         )
 

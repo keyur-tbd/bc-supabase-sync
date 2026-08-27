@@ -343,12 +343,21 @@ class SupabaseService:
         primary_key: str,
         raw_records: list[dict] | None = None,
         batch_size: int = 500,
+        quarantine_invalid: bool = True,
     ) -> tuple[int, int]:
         """
-        Validates and upserts rows. Rows with a null/empty primary key are
-        quarantined (cannot be upserted reliably). Remaining rows go through
+        Validates and upserts rows. Rows with a null/empty primary key cannot
+        be upserted reliably and are dropped. Remaining rows go through
         INSERT ... ON CONFLICT (pk) DO UPDATE in batches. Returns
-        (succeeded_count, failed_count) where failed includes quarantined.
+        (succeeded_count, failed_count).
+
+        quarantine_invalid=True (default) writes those dropped rows to
+        quarantine/ and counts them as failures, which is right when a
+        missing key is a surprise. Set it False for a page where keyless
+        rows are simply not wanted - e.g. credit-memo lines carrying no
+        product - so they are dropped quietly instead of filling
+        quarantine/ and forcing the run to partial_failure every time.
+        Dropped rows are still derivable: len(rows) - succeeded - failed.
         """
         if not rows:
             return 0, 0
@@ -374,12 +383,17 @@ class SupabaseService:
                 valid_raw.append(raw)
 
         failed = 0
-        if invalid_rows:
+        if invalid_rows and quarantine_invalid:
             self._save_quarantine(table_name, invalid_rows, f"null/empty primary key {pk_cols}")
             failed += len(invalid_rows)
             logger.warning(
                 f"{len(invalid_rows)} row(s) for {table_name} had a null/empty "
                 f"primary key and were quarantined."
+            )
+        elif invalid_rows:
+            logger.info(
+                f"{len(invalid_rows)} row(s) for {table_name} had no {pk_cols} value "
+                f"and were dropped (expected for this service; not quarantined)."
             )
 
         if not valid_rows:

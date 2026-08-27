@@ -104,6 +104,12 @@ class SyncService:
         # backfill until a watermark exists, then incremental.
         strategy = service.get("sync_strategy", "date")
         do_backfill = (mode == "full") or (not state.backfill_done)
+        # Some pages legitimately emit rows with no primary key - e.g. credit
+        # memo lines with no product on them. Those cannot be upserted and are
+        # not wanted, so dropping them quietly is correct; quarantining them
+        # would refill quarantine/ every run and pin the service at
+        # partial_failure forever.
+        quarantine_invalid = bool(service.get("quarantine_missing_pk", True))
 
         try:
             if strategy == "full_refresh":
@@ -111,16 +117,19 @@ class SyncService:
                 # every run. mode is irrelevant here.
                 processed, failed = self._run_full_refresh(
                     state, stats, name, table_name, primary_key,
+                    quarantine_invalid=quarantine_invalid,
                 )
             elif do_backfill:
                 processed, failed = self._run_backfill(
                     service, state, stats, name, table_name, primary_key,
                     history_field, granularity, sync_start,
+                    quarantine_invalid=quarantine_invalid,
                 )
             else:
                 processed, failed = self._run_incremental(
                     service, state, stats, name, table_name, primary_key,
                     incremental_field, incremental_is_datetime, lookback_days,
+                    quarantine_invalid=quarantine_invalid,
                 )
 
             status = "success" if failed == 0 else "partial_failure"
@@ -149,7 +158,7 @@ class SyncService:
 
     def _run_backfill(
         self, service, state, stats, name, table_name, primary_key,
-        history_field, granularity, sync_start,
+        history_field, granularity, sync_start, quarantine_invalid: bool = True,
     ) -> tuple[int, int]:
         # Resume point: start at the furthest completed window, never before
         # the configured floor. Clearing the etl_sync_state row forces a
@@ -183,7 +192,8 @@ class SyncService:
 
             for records, next_url in self._api.fetch_pages(name, odata_filter=odata_filter, resume_url=resume_url):
                 p, f = self._process_page(
-                    name, table_name, primary_key, history_field, records, stats
+                    name, table_name, primary_key, history_field, records, stats,
+                    quarantine_invalid=quarantine_invalid,
                 )
                 total_processed += p
                 total_failed += f
@@ -197,6 +207,7 @@ class SyncService:
     def _run_incremental(
         self, service, state, stats, name, table_name, primary_key,
         incremental_field, incremental_is_datetime, lookback_days,
+        quarantine_invalid: bool = True,
     ) -> tuple[int, int]:
         watermark = state.last_sync_at or _utc_now()
         floor = watermark - timedelta(days=lookback_days)
@@ -217,14 +228,16 @@ class SyncService:
         total_processed = 0
         total_failed = 0
         for records, next_url in self._api.fetch_pages(name, odata_filter=odata_filter, resume_url=resume_url):
-            p, f = self._process_page(name, table_name, primary_key, incremental_field, records, stats)
+            p, f = self._process_page(name, table_name, primary_key, incremental_field, records, stats,
+                                      quarantine_invalid=quarantine_invalid)
             total_processed += p
             total_failed += f
             self._db.save_resume_point(name, next_url, total_processed)
 
         return total_processed, total_failed
 
-    def _run_full_refresh(self, state, stats, name, table_name, primary_key) -> tuple[int, int]:
+    def _run_full_refresh(self, state, stats, name, table_name, primary_key,
+                          quarantine_invalid: bool = True) -> tuple[int, int]:
         """For tables with no usable timestamp and no monotonic key: re-pull
         the ENTIRE table every run (no $filter) and upsert. Correct for both
         append-only and mutable reference tables; cost scales with table
@@ -235,7 +248,8 @@ class SyncService:
         total_processed = 0
         total_failed = 0
         for records, next_url in self._api.fetch_pages(name, odata_filter=None, resume_url=resume_url):
-            p, f = self._process_page(name, table_name, primary_key, None, records, stats)
+            p, f = self._process_page(name, table_name, primary_key, None, records, stats,
+                                      quarantine_invalid=quarantine_invalid)
             total_processed += p
             total_failed += f
             self._db.save_resume_point(name, next_url, total_processed)
@@ -243,7 +257,8 @@ class SyncService:
 
     # ------------------------------------------------------------------ #
 
-    def _process_page(self, name, table_name, primary_key, date_field, records, stats) -> tuple[int, int]:
+    def _process_page(self, name, table_name, primary_key, date_field, records, stats,
+                      quarantine_invalid: bool = True) -> tuple[int, int]:
         stats.pages_fetched += 1
         stats.fetched += len(records)
         if not records:
@@ -266,9 +281,14 @@ class SyncService:
 
         succeeded, failed = self._db.upsert_rows(
             table_name=table_name, rows=rows, primary_key=primary_key, raw_records=records,
+            quarantine_invalid=quarantine_invalid,
         )
         stats.inserted += succeeded
         stats.failed += failed
+        # Rows neither written nor failed were dropped for a missing key on a
+        # service that expects that. Tracked separately so the run still ends
+        # "success" but the count stays visible in the log/run summary.
+        stats.skipped += max(0, len(rows) - succeeded - failed)
         return succeeded, failed
 
     def _flag_future_dated(self, table_name: str, date_field: str, rows: list[dict]) -> None:

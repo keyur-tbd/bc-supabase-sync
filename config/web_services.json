@@ -134,7 +134,7 @@
       "enabled": true
     },
     {
-      "_NOTE": "No usable timestamp -> full_refresh. VERIFY the composite key against a real line record: on a line, 'No' is the item number; the unique key is Document_No + Line_No. If those exact field names differ, rows will land in quarantine/ (null key) until corrected.",
+      "_NOTE": "Posted sales credit memo lines. PK is Document_No + No (the item/account number) as configured. Lines with no No carry no product data and are not wanted: quarantine_missing_pk=false drops them quietly instead of writing them to quarantine/ every run and pinning the service at partial_failure (59,070 such rows as of 2026-08-27). The dropped count still shows as 'skipped' in the run summary. This page exposes NO date field of any kind, so date-incremental is not possible here - it stays full_refresh.",
       "name": "Posted_Sales_Credit_Memo_Lines_Excel",
       "display_name": "Posted Sales Credit Memo Lines",
       "object_type": "Page",
@@ -145,7 +145,8 @@
         "No."
       ],
       "sync_strategy": "full_refresh",
-      "enabled": true
+      "enabled": true,
+      "quarantine_missing_pk": false
     },
     {
       "_NOTE": "Custom page (50003). PRIMARY KEY IS A GUESS — confirm against a real record. If rows go to quarantine/ (null key), send a sample and I'll fix the key.",
