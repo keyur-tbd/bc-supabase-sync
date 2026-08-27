@@ -18,8 +18,8 @@ BC):
 | `Posted_Sales_Invoice_Excel` | `bc_posted_sales_invoice_excel` | date | `Posting_Date` | `Posting_Date` |
 | `Sales_Return_Order_ExcelSalesLines` | `bc_sales_return_order_lines` | full_refresh | — | — |
 | `Posted_Sales_Credit_Memo_Lines_Excel` | `bc_posted_sales_credit_memo_lines` | full_refresh | — | — |
-| `Customer_Item_Reference_Excel` | `bc_customer_item_reference` | full_refresh | — | — |
-| `Ship_to_Address_Excel` | `bc_ship_to_address` | full_refresh | — | — |
+| `Customer_Item_Reference_Excel` (**disabled** – 403, needs BC permission on table 50003) | `bc_customer_item_reference` | full_refresh | — | — |
+| `Ship_to_Address_Excel` (**disabled** – 404, web service not published) | `bc_ship_to_address` | full_refresh | — | — |
 | `Requests_to_Approve_Excel` | `bc_request_to_approve` | full_refresh | — | — |
 | `Chart_of_Accounts` | `bc_chart_of_accounts` | full_refresh | — | — |
 | `Customer_Ledger_Entries_Excel` | `bc_customer_ledger_entries` | date | `Posting_Date` | `Posting_Date` + extra pass on `Closed_at_Date` |

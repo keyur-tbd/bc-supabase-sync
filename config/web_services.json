@@ -172,7 +172,7 @@
       }
     },
     {
-      "_NOTE": "Custom page (50003). PRIMARY KEY IS A GUESS — confirm against a real record. If rows go to quarantine/ (null key), send a sample and I'll fix the key.",
+      "_NOTE": "DISABLED 2026-08-28: BC returns 403 - the app registration's permission set lacks Read on custom TableData 50003 (Customer Item Reference). Re-enable once that permission is granted in BC. Custom page (50003). PRIMARY KEY IS A GUESS — confirm against a real record. If rows go to quarantine/ (null key), send a sample and I'll fix the key.",
       "name": "Customer_Item_Reference_Excel",
       "display_name": "Customer Item Reference",
       "object_type": "Page",
@@ -183,10 +183,10 @@
         "Item No."
       ],
       "sync_strategy": "full_refresh",
-      "enabled": true
+      "enabled": false
     },
     {
-      "_NOTE": "Ship-to Address (page 300). Standard key is Customer_No + Code; confirm the exact field names if rows quarantine.",
+      "_NOTE": "DISABLED 2026-08-28: BC returns 404 - no web service with this name is published in the Production environment. Re-enable after publishing page 300 as Ship_to_Address_Excel (or fix the name here). Ship-to Address (page 300). Standard key is Customer_No + Code; confirm the exact field names if rows quarantine.",
       "name": "Ship_to_Address_Excel",
       "display_name": "Ship-to Address",
       "object_type": "Page",
@@ -194,7 +194,7 @@
       "table_name": "bc_ship_to_address",
       "primary_key": "No",
       "sync_strategy": "full_refresh",
-      "enabled": true
+      "enabled": false
     },
     {
       "name": "Requests_to_Approve_Excel",
