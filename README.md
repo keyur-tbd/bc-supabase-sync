@@ -3,7 +3,7 @@
 Production-ready Python automation that pulls data from Microsoft
 Dynamics 365 Business Central's OData v4 web services and syncs it into
 Supabase (Postgres), built from the web services list exported from your BC tenant
-(`Web_Services_To_Be_Imported.xlsx`).
+(`Web_Services_To_Be_Imported.xlsx`, later extended from `Reports to add to supabase_sync.xlsx`).
 
 Currently configured for these services (regenerate
 `config/web_services.json` any time you publish more web services in
@@ -21,6 +21,10 @@ BC):
 | `Customer_Item_Reference_Excel` | `bc_customer_item_reference` | full_refresh | — | — |
 | `Ship_to_Address_Excel` | `bc_ship_to_address` | full_refresh | — | — |
 | `Requests_to_Approve_Excel` | `bc_request_to_approve` | full_refresh | — | — |
+| `Chart_of_Accounts` | `bc_chart_of_accounts` | full_refresh | — | — |
+| `Customer_Ledger_Entries_Excel` | `bc_customer_ledger_entries` | date | `Posting_Date` | `Posting_Date` + extra pass on `Closed_at_Date` |
+| `G_L_Account_Card_Excel` | `bc_gl_account_card` | full_refresh | — | — |
+| `customers` (**API v2.0**) | `bc_api_customers` | full_refresh | — | — |
 
 > Sales Return Order is an open (un-posted) document, so it has no posting
 > date — it is chunked/incremented on `Document_Date` instead. GL uses
@@ -298,6 +302,36 @@ Two BC limits shape the design, both verified against the live API:
 
 On `--mode full`, or when the table is still empty, it falls back to an
 unfiltered pull.
+
+## Standard API v2.0 entities (`"api": "v2.0"`)
+
+Besides the legacy ODataV4 web services (pages you publish yourself in
+BC > Web Services), a service can point at the **standard Business Central
+API v2.0** — the same `api/v2.0/companies(<guid>)/<entitySet>` endpoints
+the Power BI Business Central connector reads. Set `"api": "v2.0"` on the
+service and use the camelCase entity-set name (`customers`, `items`,
+`salesInvoices`, `generalLedgerEntries`, ...). Conventions that differ from
+the legacy pages:
+
+- fields are camelCase and the key is the `id` GUID → `"primary_key": "id"`
+- every entity exposes `lastModifiedDateTime` → use it for both
+  `history_field` and `incremental_field` with `incremental_is_datetime: true`
+  (a 1–2 day lookback is enough; no need to guess at business dates)
+- the company is addressed by GUID; `BC_COMPANY_ID` may stay the display
+  name — it is resolved through `/companies` once per run
+
+See `standard_api_v2_entity` in `_new_table_templates` for a copy-paste
+entry.
+
+## Mutable ledgers (`incremental_extra_fields`)
+
+Some ledgers change after posting — a customer ledger entry gets
+`Closed_at_Date` / `Open` / `Remaining_Amount` updated when a payment is
+applied months later, well outside any `Posting_Date` lookback. BC rejects
+`A ge x or B ge x` across two different fields (501), so list the extra
+date fields under `incremental_extra_fields`; each gets its own pass with
+the same floor and the rows are upserted on top. `Customer_Ledger_Entries_Excel`
+uses this with `Closed_at_Date`.
 
 ## Tables without a usable timestamp
 

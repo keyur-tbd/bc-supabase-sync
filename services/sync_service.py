@@ -68,7 +68,11 @@ class SyncService:
     def __init__(self, bc_config: BCConfig, db_config: SupabaseConfig):
         self._bc_config = bc_config
         self._auth = BCAuthService(bc_config)
-        self._api = BCApiService(bc_config, self._auth)
+        # Which endpoint family each service lives on ("odata" | "v2.0").
+        self._api = BCApiService(
+            bc_config, self._auth,
+            service_apis={s["name"]: s.get("api", "odata") for s in load_web_services()},
+        )
         self._db = SupabaseService(db_config)
 
     def run(self, mode: str = "incremental", service_filter: list[str] | None = None) -> list[SyncStats]:
@@ -245,6 +249,22 @@ class SyncService:
             total_processed += p
             total_failed += f
             self._db.save_resume_point(name, next_url, total_processed)
+
+        # Mutable ledgers (e.g. customer ledger entries) change long after
+        # they were posted - an invoice from last year gets Closed_at_Date /
+        # Open / Remaining_Amount updated when a payment is applied. BC
+        # refuses "A ge x or B ge x" across distinct fields (501), so each
+        # extra field is a separate pass over the same floor. Upserts are
+        # idempotent, so overlap between passes is harmless.
+        for extra_field in service.get("incremental_extra_fields", []) or []:
+            extra_filter = build_incremental_filter(extra_field, floor, is_datetime=incremental_is_datetime)
+            logger.info(f"[{name}] Incremental extra pass on {extra_field} ge {floor}.")
+            for records, next_url in self._api.fetch_pages(name, odata_filter=extra_filter):
+                p, f = self._process_page(name, table_name, primary_key, None, records, stats,
+                                          quarantine_invalid=quarantine_invalid)
+                total_processed += p
+                total_failed += f
+                self._db.save_resume_point(name, next_url, total_processed)
 
         return total_processed, total_failed
 

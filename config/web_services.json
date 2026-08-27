@@ -1,5 +1,5 @@
 {
-  "_comment": "Per-service sync config. URLs built at runtime from .env. STRATEGY (sync_strategy): 'date' (default) = chunk historical backfill on history_field and run incremental on incremental_field — use when the table has a usable date; 'full_refresh' = re-pull the WHOLE table every run and upsert — use when the table has NO timestamp and no monotonic key (reference/lines tables); see _new_table_templates below. PRIMARY KEY (primary_key) may be a single name OR a list for a composite key — lines/detail tables MUST use a composite key (e.g. [Document_No, Line_No]) because the document number repeats across line rows. incremental_is_datetime=true if incremental_field is a datetime (e.g. SystemCreatedAt). lookback_days = trailing re-scan buffer for date incremental.",
+  "_comment": "Per-service sync config. URLs built at runtime from .env. STRATEGY (sync_strategy): 'date' (default) = chunk historical backfill on history_field and run incremental on incremental_field — use when the table has a usable date; 'full_refresh' = re-pull the WHOLE table every run and upsert — use when the table has NO timestamp and no monotonic key (reference/lines tables); see _new_table_templates below. PRIMARY KEY (primary_key) may be a single name OR a list for a composite key — lines/detail tables MUST use a composite key (e.g. [Document_No, Line_No]) because the document number repeats across line rows. incremental_is_datetime=true if incremental_field is a datetime (e.g. SystemCreatedAt). lookback_days = trailing re-scan buffer for date incremental. API (api): 'odata' (default) = legacy ODataV4 web service published from a BC page; 'v2.0' = standard Business Central API v2.0 entity set (what Power BI's BC connector reads) - name is the camelCase entitySet (e.g. customers), primary_key is 'id', incremental on lastModifiedDateTime with incremental_is_datetime=true. incremental_extra_fields = additional date fields each re-scanned in their own pass with the same floor (BC refuses OR across distinct fields), for ledgers whose rows change after posting.",
   "_new_table_templates": {
     "table_with_a_date": {
       "name": "Some_Header_Page_Excel",
@@ -28,6 +28,23 @@
         "Line_No"
       ],
       "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    "standard_api_v2_entity": {
+      "name": "customers",
+      "display_name": "Customers (API v2.0)",
+      "api": "v2.0",
+      "object_type": "API",
+      "object_id": 0,
+      "table_name": "bc_api_customers",
+      "primary_key": "id",
+      "sync_strategy": "date",
+      "history_field": "lastModifiedDateTime",
+      "incremental_field": "lastModifiedDateTime",
+      "incremental_is_datetime": true,
+      "chunk": "monthly",
+      "lookback_days": 2,
+      "sync_start_date": "2024-04-01",
       "enabled": true
     }
   },
@@ -186,6 +203,60 @@
       "object_id": 654,
       "table_name": "bc_request_to_approve",
       "primary_key": "No",
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "_NOTE": "Chart of Accounts (page 16). 637 rows, no timestamp on the page -> full_refresh every run is cheap. Balance/Net_Change/Debit_Amount etc. are FlowFields computed at fetch time, so they reflect the whole ledger (no Date_Filter applied).",
+      "name": "Chart_of_Accounts",
+      "display_name": "Chart of Accounts",
+      "object_type": "Page",
+      "object_id": 16,
+      "table_name": "bc_chart_of_accounts",
+      "primary_key": "No",
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "_NOTE": "Customer Ledger Entries (page 25). ~308k rows, all from 2024-04-01 onwards. Entries are MUTABLE after posting: Open / Remaining_Amount / Closed_at_Date change when a payment is applied. No SystemCreatedAt/ModifiedAt on this page, so incremental runs a Posting_Date lookback (new/back-dated postings) plus an extra pass on Closed_at_Date (old invoices that just got closed). Partial applications that leave an old entry open are only refreshed by a --mode full run.",
+      "name": "Customer_Ledger_Entries_Excel",
+      "display_name": "Customer Ledger Entries",
+      "object_type": "Page",
+      "object_id": 25,
+      "table_name": "bc_customer_ledger_entries",
+      "primary_key": "Entry_No",
+      "sync_strategy": "date",
+      "history_field": "Posting_Date",
+      "incremental_field": "Posting_Date",
+      "incremental_is_datetime": false,
+      "incremental_extra_fields": [
+        "Closed_at_Date"
+      ],
+      "chunk": "monthly",
+      "lookback_days": 30,
+      "sync_start_date": "2024-04-01",
+      "enabled": true
+    },
+    {
+      "_NOTE": "G/L Account Card (page 17). 637 rows, master data with Last_Date_Modified but tiny -> full_refresh.",
+      "name": "G_L_Account_Card_Excel",
+      "display_name": "G/L Account Card",
+      "object_type": "Page",
+      "object_id": 17,
+      "table_name": "bc_gl_account_card",
+      "primary_key": "No",
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "_NOTE": "Standard API v2.0 entity (the same endpoint Power BI's BC connector reads). 428 rows, master data -> full_refresh keeps it exact regardless of when a record was last touched. Fields are camelCase; key is the id GUID.",
+      "name": "customers",
+      "display_name": "Customers (API v2.0)",
+      "api": "v2.0",
+      "object_type": "API",
+      "object_id": 0,
+      "table_name": "bc_api_customers",
+      "primary_key": "id",
       "sync_strategy": "full_refresh",
       "enabled": true
     }

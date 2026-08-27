@@ -71,6 +71,14 @@ class BCConfig:
         company_segment = quote(f"'{self.company_id}'", safe="")
         return f"{self.api_base}/{self.tenant_id}/{self.environment}/ODataV4/Company({company_segment})"
 
+    def api_v2_base_url(self) -> str:
+        """Base URL of the standard Business Central API v2.0 (the same
+        endpoints the Power BI BC connector reads). Unlike the legacy
+        ODataV4 web services, entities hang off companies(<GUID>), so the
+        company segment is appended by BCApiService after resolving the
+        GUID - see BCApiService._company_guid()."""
+        return f"{self.api_base}/{self.tenant_id}/{self.environment}/api/v2.0"
+
 
 @dataclass(frozen=True)
 class SupabaseConfig:

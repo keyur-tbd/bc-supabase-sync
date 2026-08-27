@@ -8,11 +8,22 @@ Fetches data from Business Central OData v4 web services, handling:
 - 429 throttling, respecting the Retry-After header
 - incremental/backfill sync via $filter on a configured date field
 - resuming a previously interrupted pull from a stored nextLink
+
+Two BC endpoint families are supported, chosen per service via the "api"
+key in web_services.json:
+  "odata" (default) - legacy ODataV4 web services published from BC pages
+                      (.../ODataV4/Company('<name>')/<Service_Name>)
+  "v2.0"            - the standard Business Central API v2.0
+                      (.../api/v2.0/companies(<guid>)/<entitySet>), i.e.
+                      the entities the Power BI connector reads. Fields are
+                      camelCase, the key is the `id` GUID, and every
+                      entity carries lastModifiedDateTime for incremental.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Iterator
 
 import requests
@@ -24,11 +35,48 @@ from utils.retry_helper import NonRetryableError, RetryableHTTPError, retry_with
 logger = logging.getLogger("bc_sync")
 
 
+_GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+
+
 class BCApiService:
-    def __init__(self, bc_config: BCConfig, auth_service: BCAuthService):
+    def __init__(self, bc_config: BCConfig, auth_service: BCAuthService,
+                 service_apis: dict[str, str] | None = None):
         self._config = bc_config
         self._auth = auth_service
         self._session = requests.Session()
+        # service name -> "odata" | "v2.0"; anything unlisted is legacy odata.
+        self._service_apis = {k: (v or "odata") for k, v in (service_apis or {}).items()}
+        self._company_guid_cache: str | None = None
+
+    def api_kind(self, service_name: str) -> str:
+        return self._service_apis.get(service_name, "odata")
+
+    def _company_guid(self) -> str:
+        """API v2.0 addresses the company by GUID, not display name. Accept
+        either in BC_COMPANY_ID: a GUID is used as-is, a name is resolved
+        once per process through the /companies collection."""
+        if self._company_guid_cache:
+            return self._company_guid_cache
+        company_id = self._config.company_id
+        if _GUID_RE.match(company_id):
+            self._company_guid_cache = company_id
+            return company_id
+        data = self._get_page(f"{self._config.api_v2_base_url()}/companies")
+        wanted = company_id.strip().casefold()
+        for c in data.get("value", []):
+            if str(c.get("name", "")).strip().casefold() == wanted:
+                self._company_guid_cache = c["id"]
+                logger.info(f"Resolved BC company '{company_id}' to id {c['id']} for API v2.0.")
+                return c["id"]
+        names = [c.get("name") for c in data.get("value", [])]
+        raise NonRetryableError(
+            f"BC_COMPANY_ID '{company_id}' not found among API v2.0 companies {names}"
+        )
+
+    def _entity_base_url(self, service_name: str) -> str:
+        if self.api_kind(service_name) == "v2.0":
+            return f"{self._config.api_v2_base_url()}/companies({self._company_guid()})/{service_name}"
+        return f"{self._config.odata_base_url()}/{service_name}"
 
     def build_initial_url(self, service_name: str, odata_filter: str | None = None,
                           order_by: str | None = None) -> str:
@@ -37,7 +85,7 @@ class BCApiService:
         # pulls. Page size is bounded instead via the `Prefer:
         # odata.maxpagesize` header (see _get_page), which keeps pagination
         # working across the full dataset.
-        url = f"{self._config.odata_base_url()}/{service_name}"
+        url = self._entity_base_url(service_name)
         params = []
         if odata_filter:
             params.append(f"$filter={odata_filter}")

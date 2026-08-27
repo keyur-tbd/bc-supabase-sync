@@ -76,6 +76,13 @@ jobs:
               if s["table_name"] in seen_tables:
                   problems.append(f"duplicate table_name {s['table_name']}")
               seen_names.add(s["name"]); seen_tables.add(s["table_name"])
+              if s.get("api", "odata") not in ("odata", "v2.0"):
+                  problems.append(f"{s['name']}: unknown api {s.get('api')!r} (odata | v2.0)")
+              if s.get("api") == "v2.0" and s.get("primary_key") != "id":
+                  problems.append(f"{s['name']}: API v2.0 entities are keyed by 'id'")
+              extra = s.get("incremental_extra_fields")
+              if extra is not None and not (isinstance(extra, list) and all(isinstance(x, str) and x for x in extra)):
+                  problems.append(f"{s['name']}: incremental_extra_fields must be a list of field names")
               strategy = s.get("sync_strategy", "date")
               if strategy not in ("date", "full_refresh", "series_key"):
                   problems.append(f"{s['name']}: unknown sync_strategy {strategy!r}")
