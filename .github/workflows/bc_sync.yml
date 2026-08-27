@@ -46,6 +46,14 @@ jobs:
           # IP allow-list.
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           SUPABASE_DB_SCHEMA: ${{ vars.SUPABASE_DB_SCHEMA || 'public' }}
+          # Supabase's pooler certificate does NOT verify against the OS trust
+          # store - only against the CA bundle committed alongside this repo.
+          # Without these two, libpq finds no root.crt on the runner and
+          # sslmode=require silently degrades to encrypted-but-unverified.
+          # If Supabase rotates their CA, replace prod-ca-2021.crt from
+          # Dashboard > Project Settings > Database > SSL Configuration.
+          SUPABASE_DB_SSLROOTCERT: ${{ github.workspace }}/prod-ca-2021.crt
+          SUPABASE_DB_SSLMODE: verify-full
           PG_LOWERCASE_COLUMNS: ${{ vars.PG_LOWERCASE_COLUMNS || 'false' }}
         run: |
           python app.py --mode ${{ github.event.inputs.mode || 'incremental' }}
