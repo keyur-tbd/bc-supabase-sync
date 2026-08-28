@@ -69,7 +69,7 @@ jobs:
           # database to 6.3GB. Excluded on the two high-volume tables; the
           # small ones keep it as a debugging safety net.
           SUPABASE_RAW_JSON_EXCLUDE_TABLES: >-
-            ${{ vars.SUPABASE_RAW_JSON_EXCLUDE_TABLES || 'bc_general_ledger_entries,bc_item_ledger_entries' }}
+            ${{ vars.SUPABASE_RAW_JSON_EXCLUDE_TABLES || '*' }}
         run: |
           python app.py --mode ${{ github.event.inputs.mode || 'incremental' }}
 

@@ -172,18 +172,22 @@
       }
     },
     {
-      "_NOTE": "DISABLED 2026-08-28: BC returns 403 - the app registration's permission set lacks Read on custom TableData 50003 (Customer Item Reference). Re-enable once that permission is granted in BC. Custom page (50003). PRIMARY KEY IS A GUESS — confirm against a real record. If rows go to quarantine/ (null key), send a sample and I'll fix the key.",
+      "_NOTE": "ENABLED 2026-08-28 after granting 'BAKERS DEVELOPMENT' permission set to the sync app. Custom page 50003 (Bakers Development ext). ~140k rows mapping customer + ship-to to item; no timestamp -> full_refresh. Key confirmed from real records: Customer_No + Ship_To_Code + Item_No. Ship_To_Code is blank on ~870 customer-level rows (reference applies to the whole customer) - pk_allow_empty keeps them instead of quarantining.",
       "name": "Customer_Item_Reference_Excel",
       "display_name": "Customer Item Reference",
       "object_type": "Page",
       "object_id": 50003,
       "table_name": "bc_customer_item_reference",
       "primary_key": [
-        "Ship To Code",
-        "Item No."
+        "Customer_No",
+        "Ship_To_Code",
+        "Item_No"
       ],
       "sync_strategy": "full_refresh",
-      "enabled": false
+      "enabled": true,
+      "pk_allow_empty": [
+        "Ship_To_Code"
+      ]
     },
     {
       "_NOTE": "DISABLED 2026-08-28: BC returns 404 - no web service with this name is published in the Production environment. Re-enable after publishing page 300 as Ship_to_Address_Excel (or fix the name here). Ship-to Address (page 300). Standard key is Customer_No + Code; confirm the exact field names if rows quarantine.",
@@ -279,6 +283,123 @@
       "lookback_days": 30,
       "sync_start_date": "2024-04-01",
       "enabled": true
+    },
+    {
+      "_NOTE": "Standard API v2.0 entity (same endpoint Power BI's BC connector reads). Item master data -> full_refresh keeps it exact. Fields are camelCase; key is the id GUID.",
+      "name": "items",
+      "display_name": "Items (API v2.0)",
+      "api": "v2.0",
+      "object_type": "API",
+      "object_id": 0,
+      "table_name": "bc_api_items",
+      "primary_key": "id",
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "_NOTE": "Standard API v2.0 entity (same endpoint Power BI's BC connector reads). Vendor master data -> full_refresh keeps it exact. Fields are camelCase; key is the id GUID.",
+      "name": "vendors",
+      "display_name": "Vendors (API v2.0)",
+      "api": "v2.0",
+      "object_type": "API",
+      "object_id": 0,
+      "table_name": "bc_api_vendors",
+      "primary_key": "id",
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "_NOTE": "ENABLED 2026-08-28 after granting 'ISPL ADVANCE APPROVA' permission set to the sync app. Sales Price List card (page 7000, new pricing experience). Header rows: one per price list (Code, SourceType/SourceNo = customer or price group, Status, Currency, dates). Small master data -> full_refresh.",
+      "name": "Sales_Price_Lists_Excels",
+      "display_name": "Sales Price Lists (headers)",
+      "object_type": "Page",
+      "object_id": 7000,
+      "table_name": "bc_sales_price_lists",
+      "primary_key": "Code",
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "_NOTE": "Lines subpage of the Sales Price List card - the actual customer price list: Price_List_Code, SourceNo (customer), Product_No, Variant, UoM, Minimum_Quantity, Unit_Price, Line_Discount_Percent, StartingDate/EndingDate. No timestamp -> full_refresh.",
+      "name": "Sales_Price_Lists_ExcelsLines",
+      "display_name": "Sales Price List Lines",
+      "object_type": "Page",
+      "object_id": 7000,
+      "table_name": "bc_sales_price_list_lines",
+      "primary_key": [
+        "Price_List_Code",
+        "Line_No"
+      ],
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "_NOTE": "DISABLED 2026-08-28 on user's instruction (Sales Register GST Detail rebuild paused after the disk-full outage). Do not re-enable without confirming Supabase disk headroom. ADDED 2026-08-28 for the Sales Register GST Detail rebuild. Lines subpage of Posted_Sales_Invoice_Excel (page 132/133). Posted -> immutable, no date field -> series_key above each series' stored max; new series learned from the parent header table. ~1.57M rows all-time (first pull is unfiltered).",
+      "name": "Posted_Sales_Invoice_ExcelSalesInvLines",
+      "display_name": "Posted Sales Invoice Lines",
+      "object_type": "Page",
+      "object_id": 133,
+      "table_name": "bc_posted_sales_invoice_lines",
+      "primary_key": [
+        "Document_No",
+        "Line_No"
+      ],
+      "sync_strategy": "series_key",
+      "enabled": false,
+      "series_key_field": "Document_No",
+      "series_separator": "-",
+      "series_source": {
+        "table": "bc_posted_sales_invoice_excel",
+        "column": "No"
+      }
+    },
+    {
+      "_NOTE": "DISABLED 2026-08-28 on user's instruction (Sales Register GST Detail rebuild paused after the disk-full outage). Do not re-enable without confirming Supabase disk headroom. ADDED 2026-08-28 for the Sales Register GST Detail rebuild. Lines subpage of Posted_Sales_Credit_Memo_Excel (page 134/135) keyed on the real Line_No - unlike bc_posted_sales_credit_memo_lines (page 135 standalone, keyed Document_No+No, which collapses repeated items). ~403k rows. series_key like the invoice lines.",
+      "name": "Posted_Sales_Credit_Memo_ExcelSalesCrMemoLines",
+      "display_name": "Posted Sales Credit Memo Lines (by Line_No)",
+      "object_type": "Page",
+      "object_id": 135,
+      "table_name": "bc_posted_sales_cr_memo_lines",
+      "primary_key": [
+        "Document_No",
+        "Line_No"
+      ],
+      "sync_strategy": "series_key",
+      "enabled": false,
+      "series_key_field": "Document_No",
+      "series_separator": "-",
+      "series_source": {
+        "table": "bc_posted_sales_credit_memo",
+        "column": "No"
+      }
+    },
+    {
+      "_NOTE": "DISABLED 2026-08-28 on user's instruction (Sales Register GST Detail rebuild paused after the disk-full outage). Do not re-enable without confirming Supabase disk headroom. ADDED 2026-08-28 for the Sales Register GST Detail rebuild. India GST Detailed GST Ledger Entry (table 18001, page Detailed_GST_Ledger_Entry_Excel). One row per document line per GST component (CGST/SGST or IGST); amounts are negative for sales. Joins to lines on Document_No + Document_Line_No. ~2.2M rows since 2025-04-01 (3.5M all-time). Posting_Date lookback covers back-dated postings; the Reversed flag can flip later, hence 7-day lookback.",
+      "name": "Detailed_GST_Ledger_Entry_Excel",
+      "display_name": "Detailed GST Ledger Entries",
+      "object_type": "Page",
+      "object_id": 18001,
+      "table_name": "bc_detailed_gst_ledger_entries",
+      "primary_key": "Entry_No",
+      "sync_strategy": "date",
+      "history_field": "Posting_Date",
+      "incremental_field": "Posting_Date",
+      "incremental_is_datetime": false,
+      "chunk": "monthly",
+      "lookback_days": 7,
+      "sync_start_date": "2025-04-01",
+      "enabled": false
+    },
+    {
+      "_NOTE": "DISABLED 2026-08-28 on user's instruction (Sales Register GST Detail rebuild paused after the disk-full outage). Do not re-enable without confirming Supabase disk headroom. ADDED 2026-08-28. Customer Card (page 21) - master data incl. State_Code, GST_Registration_Type, GST_Registration_No, E_Commerce_Operator which the API v2.0 customers entity lacks. 428 rows -> full_refresh.",
+      "name": "Customer_Card_Excel",
+      "display_name": "Customer Card",
+      "object_type": "Page",
+      "object_id": 21,
+      "table_name": "bc_customer_card",
+      "primary_key": "No",
+      "sync_strategy": "full_refresh",
+      "enabled": false
     }
   ]
 }

@@ -81,6 +81,11 @@ class SupabaseService:
     def __init__(self, sb_config: SupabaseConfig):
         self._config = sb_config
         self._schema = sb_config.schema
+        # table_name -> set of primary-key columns for which an empty string
+        # is a legitimate value (e.g. a blank Ship_To_Code meaning
+        # "customer-level"). Populated per service by SyncService from the
+        # optional pk_allow_empty list in web_services.json.
+        self.pk_allow_empty: dict[str, set[str]] = {}
 
         connect_args: dict[str, Any] = {}
         if sb_config.use_pooler or sb_config.is_transaction_pooler:
@@ -113,7 +118,10 @@ class SupabaseService:
         data the typed columns already hold and dominates on-disk size once a
         table reaches millions of rows.
         """
-        return table_name not in self._config.raw_json_exclude_tables
+        # "*" in SUPABASE_RAW_JSON_EXCLUDE_TABLES disables it everywhere
+        # (2026-08-28: dropped on every bc_* table to reclaim disk).
+        excl = self._config.raw_json_exclude_tables
+        return "*" not in excl and table_name not in excl
 
     # ---------- connectivity / setup ----------
 
@@ -316,21 +324,31 @@ class SupabaseService:
         current_types = self._existing_column_types(table_name)
         promotions: list[str] = []
 
+        # (col, target type). Besides VARCHAR->TEXT this also widens
+        # BIGINT->NUMERIC: BC decimals (Quantity, amounts) arrive as JSON
+        # ints whenever the sampled page happens to hold whole numbers, so
+        # the column is created BIGINT and Postgres would then silently
+        # ROUND every later fractional value on assignment. ensure_table
+        # runs per page before the upsert, so widening here is lossless.
         for col, inferred_type in inferred.items():
             if col in protected or col not in current_types:
                 continue
             cur_data_type, _cur_len = current_types[col]
-            if cur_data_type in ("character varying", "character") and inferred_type.strip().upper() == "TEXT":
-                promotions.append(col)
+            want = inferred_type.strip().upper()
+            if cur_data_type in ("character varying", "character") and want == "TEXT":
+                promotions.append((col, "TEXT"))
+            elif cur_data_type in ("bigint", "integer", "smallint") and want.startswith("NUMERIC"):
+                promotions.append((col, "NUMERIC"))
 
         if promotions:
-            logger.info(f"Promoting column(s) on {table_name} to TEXT: {', '.join(promotions)}")
+            logger.info(f"Widening column(s) on {table_name}: "
+                        + ", ".join(f"{c}->{t}" for c, t in promotions))
             with self._engine.begin() as conn:
-                for col in promotions:
+                for col, target in promotions:
                     conn.execute(
                         text(
                             f"ALTER TABLE {qualified_table(self._schema, table_name)} "
-                            f"ALTER COLUMN {quote_ident(col)} TYPE TEXT"
+                            f"ALTER COLUMN {quote_ident(col)} TYPE {target}"
                         )
                     )
             self._json_columns.pop(table_name, None)
@@ -396,10 +414,14 @@ class SupabaseService:
         pk_cols = normalize_pk(primary_key)
         raw_records = raw_records if raw_records is not None else [None] * len(rows)
 
+        allow_empty = self.pk_allow_empty.get(table_name, set())
+
         def _missing_key(row: dict) -> bool:
             for c in pk_cols:
                 v = row.get(c)
-                if v is None or (isinstance(v, str) and not v.strip()):
+                if v is None:
+                    return True
+                if isinstance(v, str) and not v.strip() and c not in allow_empty:
                     return True
             return False
 
@@ -480,12 +502,6 @@ class SupabaseService:
             prepared.append(full_row)
 
         col_list = ", ".join(quote_ident(c) for c in all_cols)
-        # CAST(:x AS JSONB) rather than :x::jsonb - SQLAlchemy's text()
-        # treats a bare colon as the start of a bind parameter, so the ::
-        # shorthand is ambiguous inside text() constructs.
-        placeholders = ", ".join(
-            (f"CAST(:{c} AS JSONB)" if c in json_cols else f":{c}") for c in all_cols
-        )
         update_cols = [c for c in all_cols if c not in pk_set]
         update_clause = ", ".join(f"{quote_ident(c)} = EXCLUDED.{quote_ident(c)}" for c in update_cols)
         # Postgres has no ON UPDATE CURRENT_TIMESTAMP, so refresh the
@@ -497,13 +513,26 @@ class SupabaseService:
         )
         conflict_target = ", ".join(quote_ident(c) for c in pk_cols)
 
-        sql = (
-            f"INSERT INTO {qualified_table(self._schema, table_name)} ({col_list}) "
-            f"VALUES ({placeholders}) "
-            f"ON CONFLICT ({conflict_target}) DO UPDATE SET {update_clause}"
-        )
+        # ONE multi-row INSERT per batch instead of executemany (one round
+        # trip per row through the transaction pooler, which made wide line
+        # tables crawl at ~50 rows/s). Positional %s placeholders go straight
+        # to the psycopg driver via exec_driver_sql, so no bind-name parsing
+        # of tens of thousands of parameters. Postgres caps a statement at
+        # 65535 parameters, so slice the batch to stay under it.
+        row_tpl = "(" + ", ".join(
+            ("CAST(%s AS JSONB)" if c in json_cols else "%s") for c in all_cols
+        ) + ")"
+        max_rows = max(1, 60000 // max(1, len(all_cols)))
         with self._engine.begin() as conn:
-            conn.execute(text(sql), prepared)
+            for start in range(0, len(prepared), max_rows):
+                chunk = prepared[start:start + max_rows]
+                params = tuple(r[c] for r in chunk for c in all_cols)
+                sql = (
+                    f"INSERT INTO {qualified_table(self._schema, table_name)} ({col_list}) "
+                    f"VALUES {', '.join([row_tpl] * len(chunk))} "
+                    f"ON CONFLICT ({conflict_target}) DO UPDATE SET {update_clause}"
+                )
+                conn.exec_driver_sql(sql, params)
 
     def _save_failed_batch(self, table_name: str, batch: list[dict], error: str) -> None:
         path = FAILED_RECORDS_DIR / f"{table_name}_{int(time.time()*1000)}.json"

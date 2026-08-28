@@ -119,6 +119,9 @@ class SyncService:
         # would refill quarantine/ every run and pin the service at
         # partial_failure forever.
         quarantine_invalid = bool(service.get("quarantine_missing_pk", True))
+        # Key columns where '' is a real value (blank Ship_To_Code = whole
+        # customer) rather than a missing key.
+        self._db.pk_allow_empty[table_name] = set(service.get("pk_allow_empty", []))
 
         try:
             if strategy == "series_key":
@@ -294,8 +297,11 @@ class SyncService:
 
         highs = self._db.max_by_series(table_name, field, sep)
 
-        # First ever run, or an explicit --mode full: take the lot, unfiltered.
-        if mode == "full" or not highs:
+        # First ever run, or an explicit --mode full: take the lot, unfiltered
+        # - unless a series_source is configured, in which case the parent
+        # table (synced by date, so already limited to sync_start_date)
+        # defines which series are in scope and older years are skipped.
+        if (mode == "full" or not highs) and not (src.get("table") and src.get("column")):
             why = "--mode full" if mode == "full" else "no rows stored yet"
             logger.info(f"[{name}] Series-key: full pull ({why}).")
             total_p = total_f = 0
@@ -308,6 +314,8 @@ class SyncService:
             return total_p, total_f
 
         series = set(highs)
+        if mode == "full":
+            highs = {}   # re-pull every in-scope series from its start
         if src.get("table") and src.get("column"):
             discovered = self._db.distinct_series(src["table"], src["column"], sep)
             new = discovered - series
