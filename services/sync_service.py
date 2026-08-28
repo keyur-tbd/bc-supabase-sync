@@ -85,8 +85,18 @@ class SyncService:
         if not self._db.test_connection():
             raise RuntimeError("Could not connect to Supabase/Postgres — aborting run.")
 
+        # Disk guard: checked before the run and again before every service,
+        # so a long backfill stops itself long before the volume fills.
+        status = self._db.check_disk_headroom()
+        if status:
+            logger.info(status)
+
         all_stats = []
         for service in services:
+            if all_stats:
+                status = self._db.check_disk_headroom()
+                if status:
+                    logger.info(status)
             all_stats.append(self._sync_one_service(service, mode))
         return all_stats
 

@@ -70,6 +70,8 @@ jobs:
           # small ones keep it as a debugging safety net.
           SUPABASE_RAW_JSON_EXCLUDE_TABLES: >-
             ${{ vars.SUPABASE_RAW_JSON_EXCLUDE_TABLES || '*' }}
+          SUPABASE_DISK_LIMIT_GB: ${{ vars.SUPABASE_DISK_LIMIT_GB || '18' }}
+          SUPABASE_DISK_STOP_PCT: ${{ vars.SUPABASE_DISK_STOP_PCT || '85' }}
         run: |
           python app.py --mode ${{ github.event.inputs.mode || 'incremental' }}
 

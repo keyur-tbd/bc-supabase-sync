@@ -106,6 +106,11 @@ class SupabaseConfig:
     sslmode: str = "require"  # Supabase requires TLS
     sslrootcert: str = ""    # path to a CA bundle, or the literal "system"
     statement_timeout_ms: int = 0   # 0 = no client-imposed limit
+    # Disk guard (2026-08-28, after a disk-full outage crash-looped the DB):
+    # the run refuses to start / continue once pg_database_size exceeds
+    # disk_stop_pct % of disk_limit_gb. 0 disables the guard.
+    disk_limit_gb: float = 0.0
+    disk_stop_pct: int = 85
     # Tables that should NOT carry the _raw_json copy of the source record.
     # That column duplicates every field the typed columns already hold; at
     # ~1KB/row it is ~90% of a wide table's on-disk size, which is fine for
@@ -213,6 +218,8 @@ def load_supabase_config() -> SupabaseConfig:
         sslmode=sslmode,
         sslrootcert=sslrootcert,
         statement_timeout_ms=int(_optional("SUPABASE_STATEMENT_TIMEOUT_MS", "0")),
+        disk_limit_gb=float(_optional("SUPABASE_DISK_LIMIT_GB", "0") or 0),
+        disk_stop_pct=int(_optional("SUPABASE_DISK_STOP_PCT", "85")),
         raw_json_exclude_tables=frozenset(
             n.strip() for n in _optional("SUPABASE_RAW_JSON_EXCLUDE_TABLES", "").split(",") if n.strip()
         ),

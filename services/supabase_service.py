@@ -47,6 +47,10 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import create_engine, event, text
+
+
+class DiskGuardError(RuntimeError):
+    """Raised when the database is too close to the disk limit to write safely."""
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -122,6 +126,25 @@ class SupabaseService:
         # (2026-08-28: dropped on every bc_* table to reclaim disk).
         excl = self._config.raw_json_exclude_tables
         return "*" not in excl and table_name not in excl
+
+    def database_size_bytes(self) -> int:
+        with self._engine.connect() as conn:
+            return int(conn.execute(text("SELECT pg_database_size(current_database())")).scalar())
+
+    def check_disk_headroom(self) -> str | None:
+        """Returns a human-readable status line, or raises DiskGuardError
+        when the database has grown past disk_stop_pct% of disk_limit_gb.
+        Returns None when the guard is disabled (disk_limit_gb == 0)."""
+        limit_gb = self._config.disk_limit_gb
+        if not limit_gb:
+            return None
+        used = self.database_size_bytes()
+        limit = limit_gb * 1024 ** 3
+        pct = 100.0 * used / limit
+        line = f"disk guard: db {used / 1024**3:.2f} GB of {limit_gb:g} GB ({pct:.0f}%), stop at {self._config.disk_stop_pct}%"
+        if pct >= self._config.disk_stop_pct:
+            raise DiskGuardError(line + " - refusing to write. Grow the disk or free space, then re-run.")
+        return line
 
     # ---------- connectivity / setup ----------
 
