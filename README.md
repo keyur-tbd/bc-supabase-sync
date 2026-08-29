@@ -15,17 +15,25 @@ BC):
 | `Item_Ledger_Entries_Excel` | `bc_item_ledger_entries` | date | `Posting_Date` | `Posting_Date` |
 | `Posted_Sales_Credit_Memo_Excel` | `bc_posted_sales_credit_memo` | date | `Posting_Date` | `Posting_Date` |
 | `Sales_Return_Order_Excel` | `bc_sales_return_order` | date | `Document_Date` | `Document_Date` |
+| `Sales_Return_Order_ExcelSalesLines` | `bc_sales_return_order_lines` | date | `Shipment_Date` | `Shipment_Date` (+ undated rows) |
 | `Posted_Sales_Invoice_Excel` | `bc_posted_sales_invoice_excel` | date | `Posting_Date` | `Posting_Date` |
-| `Sales_Return_Order_ExcelSalesLines` | `bc_sales_return_order_lines` | full_refresh | — | — |
-| `Posted_Sales_Credit_Memo_Lines_Excel` | `bc_posted_sales_credit_memo_lines` | full_refresh | — | — |
-| `Customer_Item_Reference_Excel` (**disabled** – 403, needs BC permission on table 50003) | `bc_customer_item_reference` | full_refresh | — | — |
+| `Posted_Sales_Credit_Memo_Lines_Excel` | `bc_posted_sales_credit_memo_lines` | series_key | — | `Document_No` above stored max per series |
+| `Customer_Item_Reference_Excel` (custom page 50003) | `bc_customer_item_reference` | full_refresh | — | — |
 | `Ship_to_Address_Excel` (**disabled** – 404, web service not published) | `bc_ship_to_address` | full_refresh | — | — |
 | `Requests_to_Approve_Excel` | `bc_request_to_approve` | full_refresh | — | — |
-| `Chart_of_Accounts` | `bc_chart_of_accounts` | full_refresh | — | — |
+| `Chart_of_Account` (page 16; the BC service name is singular) | `bc_chart_of_accounts` | full_refresh | — | — |
 | `Customer_Ledger_Entries_Excel` | `bc_customer_ledger_entries` | date | `Posting_Date` | `Posting_Date` + extra pass on `Closed_at_Date` |
 | `G_L_Account_Card_Excel` | `bc_gl_account_card` | full_refresh | — | — |
 | `customers` (**API v2.0**) | `bc_api_customers` | full_refresh | — | — |
+| `items` (**API v2.0**) | `bc_api_items` | full_refresh | — | — |
+| `vendors` (**API v2.0**) | `bc_api_vendors` | full_refresh | — | — |
 | `Vendor_Ledger_Entries_Excel` | `bc_vendor_ledger_entries` | date | `Posting_Date` | `Posting_Date` + extra pass on `Closed_at_Date` |
+| `Sales_Price_Lists_Excels` (Sales Price List card, page 7000) | `bc_sales_price_lists` | full_refresh | — | — |
+| `Sales_Price_Lists_ExcelsLines` (its lines subpage — the customer price list) | `bc_sales_price_list_lines` | full_refresh | — | — |
+| `Posted_Sales_Invoice_ExcelSalesInvLines` (**disabled**, see *Parked work*) | `bc_posted_sales_invoice_lines` | series_key | — | `Document_No` |
+| `Posted_Sales_Credit_Memo_ExcelSalesCrMemoLines` (**disabled**, see *Parked work*) | `bc_posted_sales_cr_memo_lines` | series_key | — | `Document_No` |
+| `Detailed_GST_Ledger_Entry_Excel` (**disabled**, see *Parked work*) | `bc_detailed_gst_ledger_entries` | date | `Posting_Date` | `Posting_Date` |
+| `Customer_Card_Excel` (**disabled**, see *Parked work*) | `bc_customer_card` | full_refresh | — | — |
 
 > Sales Return Order is an open (un-posted) document, so it has no posting
 > date — it is chunked/incremented on `Document_Date` instead. GL uses
@@ -65,21 +73,27 @@ BC):
     process crashes or a GitHub Actions job times out mid-pull, the next
     run resumes from that exact page instead of starting over or
     skipping records.
--   **`_raw_json` sizing**: by default each table also stores the complete
-    source record as JSONB. That is a genuine safety net at small scale, but
-    it duplicates every field the typed columns already hold and runs about
-    1 KB per row — roughly **90% of a wide row's on-disk size**. On the GL
-    table it alone took the database past 6 GB. List high-volume tables in
-    `SUPABASE_RAW_JSON_EXCLUDE_TABLES` to skip it; small tables keep it.
-    **Order matters** when turning it off for a table that already exists:
-    deploy the setting first, *then* drop the column. Dropping first makes
-    every upsert fail, because the INSERT still names the column.
+-   **No `_raw_json` copy**: earlier versions stored the complete source
+    record as JSONB next to the typed columns. It duplicated every field,
+    ran ~1 KB per row and was ~90% of a wide table's size; on 2026-08-28 it
+    was dropped from every `bc_*` table and disabled everywhere with
+    `SUPABASE_RAW_JSON_EXCLUDE_TABLES=*` (the workflow default). Leave it
+    that way — see *Storage and the disk guard* below.
+-   **Disk guard**: before a run and again before every service the sync
+    compares `pg_database_size()` with `SUPABASE_DISK_LIMIT_GB` and refuses
+    to write once usage passes `SUPABASE_DISK_STOP_PCT` (default 85%),
+    exiting non-zero with a clear message. A long backfill therefore stops
+    itself long before the volume fills. `0` disables the guard.
 -   **Schema**: tables are created automatically from the shape of the
-    data. New fields are added as new columns, and existing `VARCHAR`
-    columns are **widened** when a longer value appears — columns are
-    never dropped or narrowed. The primary key is the configured business
-    key (e.g. `No` / `Entry_No`). Each table also gets a `_raw_json`
-    column with the full original record and a `_synced_at` timestamp.
+    data. New fields are added as new columns; existing `VARCHAR` columns
+    are widened to `TEXT`, and `BIGINT` columns are widened to `NUMERIC`
+    the first time a fractional value shows up (BC decimals such as
+    `Quantity` arrive as JSON integers whenever the sampled page happens to
+    hold whole numbers — without the widening Postgres would silently round
+    every later `12.5` to `13`). The check runs per page *before* the
+    upsert, so it is lossless. Columns are never dropped or narrowed. The
+    primary key is the configured business key (e.g. `No` / `Entry_No`),
+    and every table gets a `_synced_at` timestamp.
 -   **Validation**: rows with a null/empty primary key are written to
     `quarantine/` and skipped (they can't be upserted); rows whose date
     field is implausibly in the future are copied to `quarantine/` for
@@ -90,12 +104,19 @@ BC):
     `quarantine/`, not counted as failures (so the run ends `success`
     rather than `partial_failure`), but still reported as `skipped=N` in
     the log line and the run summary JSON.
+    Where an *empty string* is a legitimate key value — e.g.
+    `Customer_Item_Reference_Excel`, whose blank `Ship_To_Code` means "the
+    whole customer" — list those columns in `"pk_allow_empty"` so the rows
+    are kept instead of quarantined.
 -   **PK guard**: at the start of each service the table's actual primary
     key is compared to the configured one; a mismatch is logged loudly
     (editing config alone never migrates an existing table's key).
--   **Upserts**: `INSERT ... ON CONFLICT (pk) DO UPDATE` in batches of 500,
-    so reruns and overlapping incremental windows never create
-    duplicates.
+-   **Upserts**: one multi-row `INSERT ... VALUES (...), (...) ON CONFLICT
+    (pk) DO UPDATE` per batch of 500 (sliced further to stay under
+    Postgres's 65 535-parameter limit), so reruns and overlapping
+    incremental windows never create duplicates. It replaced a per-row
+    `executemany`, which crawled at ~50 rows/s through Supabase's
+    transaction pooler; wide line tables now load at ~125 rows/s.
 -   **Failures**: a failing batch doesn't kill the whole run — it's
     written to `failed_records/<table>_<timestamp>.json` for
     inspection/replay, and the run is marked `partial_failure` rather
@@ -114,7 +135,8 @@ bc_supabase_sync/
 ├── config/
 │   └── web_services.json           # generated from the BC web services Excel export
 ├── scripts/
-│   └── generate_config_from_excel.py
+│   ├── generate_config_from_excel.py
+│   └── reclaim_vacuum_full.py      # guarded VACUUM FULL, smallest table first (see Storage)
 ├── services/
 │   ├── auth_service.py             # OAuth2 client-credentials auth
 │   ├── bc_api_service.py           # paginated OData fetch + retries
@@ -142,9 +164,16 @@ bc_supabase_sync/
 In Entra ID, create an App Registration, grant it **Application**
 permissions for `Dynamics 365 Business Central` (`API.ReadWrite.All` or
 a narrower permission if you've scoped it), get admin consent, and
-create a client secret. In BC itself, the app's service principal needs
-a permission set (e.g. via Tenant Admin Center → API access) covering
-the pages you're syncing.
+create a client secret. In BC itself (**Microsoft Entra Applications**
+page) the app needs permission sets covering the pages you're syncing.
+`D365 BUS FULL ACCESS` covers Microsoft's base tables only; a page that
+touches a table from a partner extension fails with `403 ... TableData
+<id> ... Read: <Extension Name>` until that extension's own permission set
+is added (here `ISPL ADVANCE APPROVA` for the price list pages and
+`BAKERS DEVELOPMENT` for Customer Item Reference). BC refuses to assign
+`SUPER` to an application, and a user whose own SUPER is scoped to one
+company can only add company-scoped rows — set the Company column to the
+same company rather than leaving it blank.
 
 ### 2. Install dependencies
 
@@ -161,6 +190,17 @@ cp .env.example .env
 # fill in BC_CLIENT_ID, BC_CLIENT_SECRET, BC_TENANT_ID, BC_ENVIRONMENT,
 # BC_COMPANY_ID, and SUPABASE_DB_URL
 ```
+
+Storage-related settings (all optional, shown with the values in use):
+
+| Variable | Value | Meaning |
+|---|---|---|
+| `SUPABASE_RAW_JSON_EXCLUDE_TABLES` | `*` | never create/populate `_raw_json` (`*` = every table; or a comma list) |
+| `SUPABASE_DISK_LIMIT_GB` | `18` | the project's disk size, as shown under *Settings → Compute and Disk* |
+| `SUPABASE_DISK_STOP_PCT` | `85` | refuse to write above this percentage of the limit |
+
+Update `SUPABASE_DISK_LIMIT_GB` (here, in the workflow default and in the
+repo variable) whenever the Supabase disk is resized.
 
 ### 4. (Re)generate the service config from your BC Excel export
 
@@ -216,8 +256,14 @@ at least one service had a partial batch failure (check
 Actions cron, using repo secrets for every credential (no secret ever
 touches the repo). Add these as **Settings → Secrets and variables →
 Actions**: `BC_CLIENT_ID`, `BC_CLIENT_SECRET`, `BC_TENANT_ID`,
-`BC_ENVIRONMENT`, `BC_COMPANY_ID`, `SUPABASE_DB_URL`. Trigger an ad hoc full
-sync from the Actions tab via "Run workflow" → mode `full`.
+`BC_ENVIRONMENT`, `BC_COMPANY_ID`, `SUPABASE_DB_URL`. The repo
+**variables** `SUPABASE_RAW_JSON_EXCLUDE_TABLES`, `SUPABASE_DISK_LIMIT_GB`
+and `SUPABASE_DISK_STOP_PCT` override the workflow defaults (`*`, `18`,
+`85`). Trigger an ad hoc full sync from the Actions tab via "Run workflow"
+→ mode `full`.
+
+The cron reads `config/web_services.json` **from the repo**, so a service
+added or changed locally only reaches the schedule once it is pushed.
 
 If you'd rather run it as a long-lived process instead of CI cron, wrap
 `SyncService.run()` in your own loop (e.g. with `schedule` or
@@ -265,10 +311,14 @@ Each BC entity gets one Supabase (Postgres) table. Simple nested objects are fla
 (`Address.City` → `address_city`); arrays and deeply nested structures
 are kept as JSON in their own column rather than guessing a relational
 shape for them, since BC sub-collections vary a lot in structure across
-pages. The full original record is always preserved in `_raw_json`
-regardless of how the flattened columns turned out, so nothing is ever
-lossy even if a column's inferred type ends up too narrow for an edge
-case.
+pages. There is no raw copy of the source record any more (see *Storage
+and the disk guard*); the typed columns are the data, which is why the
+schema code widens types rather than ever narrowing them.
+
+Two BC-side facts worth knowing when reading the tables: rows with
+identical content but different `Entry_No` / `Line_No` are valid BC
+output, not duplicates; and BC writes an unset date as `0001-01-01`, not
+`NULL`.
 
 
 ## Tables keyed by a BC no.-series (`series_key`)
@@ -301,8 +351,11 @@ Two BC limits shape the design, both verified against the live API:
     I know". `series_source` names the parent document table (which syncs by
     date) and any series present there but absent locally is pulled in full.
 
-On `--mode full`, or when the table is still empty, it falls back to an
-unfiltered pull.
+When `series_source` is configured, the very first pull (and `--mode
+full`) takes its series list from that parent table — which is itself
+limited by its `sync_start_date` — instead of pulling the page unfiltered,
+so all-time history older than the parent's window is skipped. Only a
+service with no `series_source` falls back to an unfiltered pull.
 
 ## Standard API v2.0 entities (`"api": "v2.0"`)
 
@@ -362,3 +415,64 @@ Lines/detail tables also need a **composite primary key**, e.g.
 repeats across line rows, so a single-column key would overwrite lines.
 See `_new_table_templates` in `config/web_services.json` for copy-paste
 examples of both cases.
+
+## Storage and the disk guard
+
+**What happened on 2026-08-28.** A bulk `ALTER TABLE ... ALTER COLUMN ...
+TYPE numeric` across every `bc_*` table (including the 6.2M-row GL and
+2M-row item-ledger tables) rewrote those tables — a rewrite needs a full
+temporary copy — and filled the Supabase disk mid-way. Postgres flipped
+read-only, then crash-looped in recovery with *"could not extend file ...
+No space left on device"* until Supabase auto-grew the volume (12 → 18 GB).
+Nothing was lost: the ALTER rolled back and all committed data survived.
+
+Rules that came out of it:
+
+-   **Check headroom before any bulk load or rewrite.** `pg_database_size`
+    vs the disk size in *Settings → Compute and Disk*; keep well under 85%.
+    Note that Supabase's "100 GB"-style allowances are Storage/egress
+    quotas — the Postgres disk is separate (8 GB on Pro, auto-grown ~50% at
+    90% usage, but only once per 6 hours, and manual resizes are blocked
+    during that cooldown).
+-   **Never run DDL that rewrites a large table** (`ALTER TYPE`, `VACUUM
+    FULL`, `CLUSTER`) without room for a full copy of that table, and do it
+    one table at a time, smallest first. Prefer forward fixes in the sync
+    (the BIGINT → NUMERIC widening above) over rewriting history.
+-   The disk guard (`SUPABASE_DISK_LIMIT_GB` / `SUPABASE_DISK_STOP_PCT`) is
+    the backstop; keep it configured and update the limit when the disk
+    changes.
+
+**Reclaiming space.** Dropping a column (as `_raw_json` was) frees nothing
+by itself — the bytes stay inside every existing row until the table is
+rewritten. Plain `VACUUM` only marks dead rows reusable and never shrinks
+the file. `scripts/reclaim_vacuum_full.py <disk_gb>` rewrites the big
+tables with `VACUUM FULL` one at a time, smallest first, and skips any
+table for which `db_size + 1.2 × table_size` would exceed 85% of the disk;
+the original table is untouched if a rewrite fails. On 2026-08-29 it took
+the database from 9.0 GB to 7.5 GB (credit-memo lines 419 → 98 MB; GL and
+item ledger were already lean because they never stored raw JSON).
+
+## Parked work: Sales Register GST Detail
+
+The partner report *Sales Register GST Detail* (report 74365) cannot be
+fetched as a report, but everything it prints is available from published
+pages and can be rebuilt as a Supabase view: header fields from the posted
+invoice / credit-memo tables, line fields from
+`Posted_Sales_Invoice_ExcelSalesInvLines` /
+`Posted_Sales_Credit_Memo_ExcelSalesCrMemoLines`, and the GST split
+(HSN, group, %, base, IGST/CGST/SGST, place of supply, GSTINs) from
+`Detailed_GST_Ledger_Entry_Excel` (one row per line per component, joined
+on `Document_No` + `Document_Line_No`; report amounts are `-1 ×` the
+ledger's). Verified against an April-2026 export: ~65 of 70 columns map
+exactly. Decisions taken: MRP comes from
+`bc_sales_price_list_lines.Unit_Price` (current list price, so historical
+months may differ), transfer-shipment rows are not needed (P&L use only),
+TCS is 0, COGS needs reconciliation against Value Entries, and state names
+(`24-GUJARAT`) need a 36-row state lookup.
+
+The four source services are in `config/web_services.json` with
+`"enabled": false` and are **not to be re-enabled until the Supabase disk
+has room** for roughly 0.7 GB (current FY only) to 2.5 GB (from
+2025-04-01). The rebuild was paused on the user's instruction after the
+disk incident above.
+
