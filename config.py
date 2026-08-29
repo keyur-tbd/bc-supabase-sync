@@ -51,8 +51,19 @@ class BCConfig:
     # header. Unlike $top (which BC treats as a hard total cap and which
     # then suppresses @odata.nextLink), maxpagesize bounds each PAGE while
     # still emitting a nextLink for the remainder — so the full dataset is
-    # retrieved across many small, timeout-resistant pages.
-    max_page_size: int = 2000
+    # retrieved across many pages.
+    #
+    # BC caps this at 20000 server-side: asking for 30000/50000/100000 all
+    # return exactly 20000 rows (measured 2026-08-29). Per-row cost, not row
+    # count, is what matters — a wide page (Posted_Sales_Invoice_Excel is
+    # ~3.9 KB/row) is 20x the payload of a narrow one (Customer Item
+    # Reference, ~275 B/row) for the same page size. Almost all of the
+    # speed-up lands between 2000 and 5000 (per-request overhead is
+    # amortised); beyond that the per-row rate is flat while the cost of a
+    # timeout/retry — which re-fetches the whole page — keeps growing.
+    # Hence 5000 as the default, raised per service in web_services.json
+    # ("max_page_size") for narrow tables where a big page is still cheap.
+    max_page_size: int = 5000
     # Default trailing re-scan buffer (days) for incremental syncs that key
     # off a business date (e.g. Posting_Date), to catch back-dated postings.
     # Overridable per service via "lookback_days" in web_services.json.
@@ -182,7 +193,7 @@ def load_bc_config() -> BCConfig:
         environment=_require("BC_ENVIRONMENT"),
         company_id=_require("BC_COMPANY_ID"),
         request_timeout_seconds=int(_optional("BC_REQUEST_TIMEOUT_SECONDS", "300")),
-        max_page_size=int(_optional("BC_MAXPAGESIZE", "2000")),
+        max_page_size=int(_optional("BC_MAXPAGESIZE", "5000")),
         default_lookback_days=int(_optional("BC_LOOKBACK_DAYS", "7")),
     )
 

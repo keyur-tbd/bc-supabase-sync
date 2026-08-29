@@ -46,7 +46,8 @@
       "lookback_days": 2,
       "sync_start_date": "2024-04-01",
       "enabled": true
-    }
+    },
+    "_page_size_note": "Optional per-service \"max_page_size\" overrides BC_MAXPAGESIZE (default 5000) in the Prefer: odata.maxpagesize header. BC caps it at 20000. Raise it only for NARROW rows - cost is bytes, not rows: 10000 rows of Customer Item Reference is 2.8 MB, 10000 rows of Posted_Sales_Invoice_Excel is 38 MB. A page that times out is re-fetched whole, so a big page on a wide table makes every retry expensive."
   },
   "services": [
     {
@@ -151,7 +152,7 @@
       "enabled": true
     },
     {
-      "_NOTE": "Posted sales credit memo lines. PK is Document_No + No (item/account number) as configured. Lines with no No carry no product data and are not wanted: quarantine_missing_pk=false drops them quietly rather than refilling quarantine/ every run and pinning the service at partial_failure. Dropped counts show as skipped=N in the run summary. This page exposes NO date field of any kind, so sync_strategy is series_key: posted documents are immutable and their numbers only grow within a BC no.-series (26CNMUM-00001 ...), so 'above the highest number stored' is a complete window. One request per series - BC answers 501 to an OR of AND-groups - and 501 to 'not (...)', so new series are learned from series_source (the parent document table, which syncs by date) instead of from the API.",
+      "_NOTE": "Posted sales credit memo lines. PK is Document_No + No (item/account number) as configured. Lines with no No carry no product data and are not wanted: quarantine_missing_pk=false drops them quietly rather than refilling quarantine/ every run and pinning the service at partial_failure. Dropped counts show as skipped=N in the run summary. This page exposes NO date field of any kind, so sync_strategy is series_key: posted documents are immutable and their numbers only grow within a BC no.-series (26CNMUM-00001 ...), so 'above the highest number stored' is a complete window. One request per series - BC answers 501 to an OR of AND-groups - and 501 to 'not (...)', so new series are learned from series_source (the parent document table, which syncs by date) instead of from the API. Narrow rows (693 B/row -> 6.9 MB/page; 322k rows), so max_page_size 10000 rather than the 5000 default.",
       "name": "Posted_Sales_Credit_Memo_Lines_Excel",
       "display_name": "Posted Sales Credit Memo Lines",
       "object_type": "Page",
@@ -169,10 +170,11 @@
       "series_source": {
         "table": "bc_posted_sales_credit_memo",
         "column": "No"
-      }
+      },
+      "max_page_size": 10000
     },
     {
-      "_NOTE": "ENABLED 2026-08-28 after granting 'BAKERS DEVELOPMENT' permission set to the sync app. Custom page 50003 (Bakers Development ext). ~140k rows mapping customer + ship-to to item; no timestamp -> full_refresh. Key confirmed from real records: Customer_No + Ship_To_Code + Item_No. Ship_To_Code is blank on ~870 customer-level rows (reference applies to the whole customer) - pk_allow_empty keeps them instead of quarantining.",
+      "_NOTE": "ENABLED 2026-08-28 after granting 'BAKERS DEVELOPMENT' permission set to the sync app. Custom page 50003 (Bakers Development ext). ~140k rows mapping customer + ship-to to item; no timestamp -> full_refresh. Key confirmed from real records: Customer_No + Ship_To_Code + Item_No. Ship_To_Code is blank on ~870 customer-level rows (reference applies to the whole customer) - pk_allow_empty keeps them instead of quarantining. Narrow rows (275 B/row -> 2.8 MB/page; 140k rows, the biggest beneficiary), so max_page_size 10000 rather than the 5000 default.",
       "name": "Customer_Item_Reference_Excel",
       "display_name": "Customer Item Reference",
       "object_type": "Page",
@@ -187,7 +189,8 @@
       "enabled": true,
       "pk_allow_empty": [
         "Ship_To_Code"
-      ]
+      ],
+      "max_page_size": 10000
     },
     {
       "_NOTE": "DISABLED 2026-08-28: BC returns 404 - no web service with this name is published in the Production environment. Re-enable after publishing page 300 as Ship_to_Address_Excel (or fix the name here). Ship-to Address (page 300). Standard key is Customer_No + Code; confirm the exact field names if rows quarantine.",
@@ -253,7 +256,7 @@
       "enabled": true
     },
     {
-      "_NOTE": "Standard API v2.0 entity (the same endpoint Power BI's BC connector reads). 428 rows, master data -> full_refresh keeps it exact regardless of when a record was last touched. Fields are camelCase; key is the id GUID.",
+      "_NOTE": "Standard API v2.0 entity (the same endpoint Power BI's BC connector reads). 428 rows, master data -> full_refresh keeps it exact regardless of when a record was last touched. Fields are camelCase; key is the id GUID. Narrow rows (884 B/row -> 8.8 MB/page), so max_page_size 10000 rather than the 5000 default.",
       "name": "customers",
       "display_name": "Customers (API v2.0)",
       "api": "v2.0",
@@ -262,7 +265,8 @@
       "table_name": "bc_api_customers",
       "primary_key": "id",
       "sync_strategy": "full_refresh",
-      "enabled": true
+      "enabled": true,
+      "max_page_size": 10000
     },
     {
       "_NOTE": "Vendor Ledger Entries (page 29). ~36k rows, all from 2024-04-01 onwards. Same shape as Customer_Ledger_Entries_Excel: mutable after posting (Open / Remaining_Amount / Closed_at_Date), no SystemCreatedAt -> Posting_Date lookback plus an extra pass on Closed_at_Date.",
@@ -285,7 +289,7 @@
       "enabled": true
     },
     {
-      "_NOTE": "Standard API v2.0 entity (same endpoint Power BI's BC connector reads). Item master data -> full_refresh keeps it exact. Fields are camelCase; key is the id GUID.",
+      "_NOTE": "Standard API v2.0 entity (same endpoint Power BI's BC connector reads). Item master data -> full_refresh keeps it exact. Fields are camelCase; key is the id GUID. Narrow rows (829 B/row -> 8.3 MB/page), so max_page_size 10000 rather than the 5000 default.",
       "name": "items",
       "display_name": "Items (API v2.0)",
       "api": "v2.0",
@@ -294,10 +298,11 @@
       "table_name": "bc_api_items",
       "primary_key": "id",
       "sync_strategy": "full_refresh",
-      "enabled": true
+      "enabled": true,
+      "max_page_size": 10000
     },
     {
-      "_NOTE": "Standard API v2.0 entity (same endpoint Power BI's BC connector reads). Vendor master data -> full_refresh keeps it exact. Fields are camelCase; key is the id GUID.",
+      "_NOTE": "Standard API v2.0 entity (same endpoint Power BI's BC connector reads). Vendor master data -> full_refresh keeps it exact. Fields are camelCase; key is the id GUID. Narrow rows (706 B/row -> 7.1 MB/page), so max_page_size 10000 rather than the 5000 default.",
       "name": "vendors",
       "display_name": "Vendors (API v2.0)",
       "api": "v2.0",
@@ -306,10 +311,11 @@
       "table_name": "bc_api_vendors",
       "primary_key": "id",
       "sync_strategy": "full_refresh",
-      "enabled": true
+      "enabled": true,
+      "max_page_size": 10000
     },
     {
-      "_NOTE": "ENABLED 2026-08-28 after granting 'ISPL ADVANCE APPROVA' permission set to the sync app. Sales Price List card (page 7000, new pricing experience). Header rows: one per price list (Code, SourceType/SourceNo = customer or price group, Status, Currency, dates). Small master data -> full_refresh.",
+      "_NOTE": "ENABLED 2026-08-28 after granting 'ISPL ADVANCE APPROVA' permission set to the sync app. Sales Price List card (page 7000, new pricing experience). Header rows: one per price list (Code, SourceType/SourceNo = customer or price group, Status, Currency, dates). Small master data -> full_refresh. Narrow rows (511 B/row -> 5.1 MB/page), so max_page_size 10000 rather than the 5000 default.",
       "name": "Sales_Price_Lists_Excels",
       "display_name": "Sales Price Lists (headers)",
       "object_type": "Page",
@@ -317,10 +323,11 @@
       "table_name": "bc_sales_price_lists",
       "primary_key": "Code",
       "sync_strategy": "full_refresh",
-      "enabled": true
+      "enabled": true,
+      "max_page_size": 10000
     },
     {
-      "_NOTE": "Lines subpage of the Sales Price List card - the actual customer price list: Price_List_Code, SourceNo (customer), Product_No, Variant, UoM, Minimum_Quantity, Unit_Price, Line_Discount_Percent, StartingDate/EndingDate. No timestamp -> full_refresh.",
+      "_NOTE": "Lines subpage of the Sales Price List card - the actual customer price list: Price_List_Code, SourceNo (customer), Product_No, Variant, UoM, Minimum_Quantity, Unit_Price, Line_Discount_Percent, StartingDate/EndingDate. No timestamp -> full_refresh. Narrow rows (809 B/row -> 8.1 MB/page; 35k rows), so max_page_size 10000 rather than the 5000 default.",
       "name": "Sales_Price_Lists_ExcelsLines",
       "display_name": "Sales Price List Lines",
       "object_type": "Page",
@@ -331,7 +338,8 @@
         "Line_No"
       ],
       "sync_strategy": "full_refresh",
-      "enabled": true
+      "enabled": true,
+      "max_page_size": 10000
     },
     {
       "_NOTE": "DISABLED 2026-08-28 on user's instruction (Sales Register GST Detail rebuild paused after the disk-full outage). Do not re-enable without confirming Supabase disk headroom. ADDED 2026-08-28 for the Sales Register GST Detail rebuild. Lines subpage of Posted_Sales_Invoice_Excel (page 132/133). Posted -> immutable, no date field -> series_key above each series' stored max; new series learned from the parent header table. ~1.57M rows all-time (first pull is unfiltered).",

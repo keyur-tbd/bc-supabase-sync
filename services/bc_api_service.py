@@ -37,19 +37,33 @@ logger = logging.getLogger("bc_sync")
 
 _GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 
+# BC ignores anything above this in Prefer: odata.maxpagesize and silently
+# returns 20000 (verified against the live API, 2026-08-29).
+BC_MAX_PAGE_SIZE = 20000
+
 
 class BCApiService:
     def __init__(self, bc_config: BCConfig, auth_service: BCAuthService,
-                 service_apis: dict[str, str] | None = None):
+                 service_apis: dict[str, str] | None = None,
+                 service_page_sizes: dict[str, int] | None = None):
         self._config = bc_config
         self._auth = auth_service
         self._session = requests.Session()
         # service name -> "odata" | "v2.0"; anything unlisted is legacy odata.
         self._service_apis = {k: (v or "odata") for k, v in (service_apis or {}).items()}
+        # service name -> Prefer: odata.maxpagesize override. Unlisted
+        # services use BC_MAXPAGESIZE. Clamped to BC's server-side cap.
+        self._service_page_sizes = {
+            k: max(1, min(int(v), BC_MAX_PAGE_SIZE))
+            for k, v in (service_page_sizes or {}).items() if v
+        }
         self._company_guid_cache: str | None = None
 
     def api_kind(self, service_name: str) -> str:
         return self._service_apis.get(service_name, "odata")
+
+    def page_size_for(self, service_name: str) -> int:
+        return self._service_page_sizes.get(service_name, self._config.max_page_size)
 
     def _company_guid(self) -> str:
         """API v2.0 addresses the company by GUID, not display name. Accept
@@ -99,14 +113,14 @@ class BCApiService:
         return url
 
     @retry_with_backoff(max_attempts=5, base_delay=2.0)
-    def _get_page(self, url: str) -> dict:
+    def _get_page(self, url: str, page_size: int | None = None) -> dict:
         headers = {
             **self._auth.auth_header(),
             "Accept": "application/json",
             # Bound each page server-side while still receiving an
             # @odata.nextLink for the rest. Smaller pages also return faster,
             # which avoids read timeouts on heavy entities.
-            "Prefer": f"odata.maxpagesize={self._config.max_page_size}",
+            "Prefer": f"odata.maxpagesize={page_size or self._config.max_page_size}",
         }
         try:
             resp = self._session.get(url, headers=headers, timeout=self._config.request_timeout_seconds)
@@ -149,11 +163,12 @@ class BCApiService:
         the exact same point via `resume_url`.
         """
         url = resume_url or self.build_initial_url(service_name, odata_filter, order_by)
+        page_size = self.page_size_for(service_name)
         page_num = 0
         while url:
             page_num += 1
-            logger.info(f"[{service_name}] Fetching page {page_num}...")
-            data = self._get_page(url)
+            logger.info(f"[{service_name}] Fetching page {page_num} (max {page_size} rows)...")
+            data = self._get_page(url, page_size)
             records = data.get("value", [])
             next_url = data.get("@odata.nextLink")
             logger.info(f"[{service_name}] Page {page_num}: {len(records)} record(s).")

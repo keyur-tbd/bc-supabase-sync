@@ -94,6 +94,9 @@ jobs:
                   src = s.get("series_source") or {}
                   if src and not (src.get("table") and src.get("column")):
                       problems.append(f"{s['name']}: series_source needs both table and column")
+              mps = s.get("max_page_size")
+              if mps is not None and not (isinstance(mps, int) and not isinstance(mps, bool) and 1 <= mps <= 20000):
+                  problems.append(f"{s['name']}: max_page_size must be an int 1..20000 (BC clamps above 20000)")
               # A composite primary key must be a list, not a bare string.
               if isinstance(s.get("primary_key"), list) and not s["primary_key"]:
                   problems.append(f"{s['name']}: primary_key list is empty")

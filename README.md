@@ -50,7 +50,8 @@ BC):
 -   **Pagination**: follows `@odata.nextLink` until exhausted. Page size
     is bounded with the `Prefer: odata.maxpagesize` header rather than
     `$top` — `$top` makes BC cap the result and stop sending a nextLink,
-    which silently truncated large pulls to one page.
+    which silently truncated large pulls to one page. The size is
+    `BC_MAXPAGESIZE` (5000), overridable per service — see *Page size*.
 -   **Two-phase sync**:
     -   *Backfill* (on `--mode full`, or automatically on first run):
         the `[sync_start_date, today]` range is sliced into windows
@@ -198,6 +199,7 @@ Storage-related settings (all optional, shown with the values in use):
 | `SUPABASE_RAW_JSON_EXCLUDE_TABLES` | `*` | never create/populate `_raw_json` (`*` = every table; or a comma list) |
 | `SUPABASE_DISK_LIMIT_GB` | `18` | the project's disk size, as shown under *Settings → Compute and Disk* |
 | `SUPABASE_DISK_STOP_PCT` | `85` | refuse to write above this percentage of the limit |
+| `BC_MAXPAGESIZE` | `5000` | default rows per BC page; per-service `max_page_size` overrides it (see *Page size*) |
 
 Update `SUPABASE_DISK_LIMIT_GB` (here, in the workflow default and in the
 repo variable) whenever the Supabase disk is resized.
@@ -356,6 +358,48 @@ full`) takes its series list from that parent table — which is itself
 limited by its `sync_start_date` — instead of pulling the page unfiltered,
 so all-time history older than the parent's window is skipped. Only a
 service with no `series_source` falls back to an unfiltered pull.
+
+## Page size (`max_page_size`)
+
+`BC_MAXPAGESIZE` sets the default `Prefer: odata.maxpagesize`; any service
+can override it with `"max_page_size"` in `config/web_services.json`.
+
+**BC's ceiling is 20000.** Asking for 30000, 50000 or 100000 all returned
+exactly 20000 rows with a valid `nextLink` (measured against the live
+tenant, 2026-08-29), so anything higher is silently clamped.
+
+What actually matters is **bytes per row, not row count** — the same page
+size costs wildly different amounts per entity:
+
+| Entity | B/row | 10000-row page |
+|---|---|---|
+| `Customer_Item_Reference_Excel` | 275 | 2.8 MB |
+| `Posted_Sales_Credit_Memo_Lines_Excel` | 693 | 6.9 MB |
+| `customers` (v2.0) | 884 | 8.8 MB |
+| `Item_Ledger_Entries_Excel` | 1 879 | 18.8 MB |
+| `Posted_Sales_Invoice_Excel` | 3 863 | 38.6 MB |
+
+Throughput on a wide entity went 178 rows/s at 2000 → 276 at 5000 → ~290
+at 10000–20000: **nearly all of the gain lands by 5000**, because what the
+bigger page removes is per-request overhead, not per-row cost. Past that
+the page keeps getting more expensive to lose:
+
+-   a page that hits `BC_REQUEST_TIMEOUT_SECONDS` (300) is **re-fetched
+    whole**, up to 5 times with backoff — cheap for a 5000-row page, very
+    expensive for a 20000-row one;
+-   the resume point is saved per page, so a crash loses up to one page of
+    progress;
+-   the whole page is held in memory as parsed Python objects (roughly
+    5–10× the JSON size) before the batched upsert.
+
+Hence: **5000 by default, 10000 for narrow tables** (currently Customer
+Item Reference, credit-memo lines, the two price-list services, and the
+API v2.0 `customers` / `items` / `vendors`). Wide document tables stay at
+5000. Raising a *wide* table to 20000 is the one combination to avoid.
+
+Note also that the fetch is only about half the wall clock — the Supabase
+upsert is the other half — so end-to-end gains are smaller than the
+fetch-rate numbers above.
 
 ## Standard API v2.0 entities (`"api": "v2.0"`)
 

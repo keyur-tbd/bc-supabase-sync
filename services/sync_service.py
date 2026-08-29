@@ -69,9 +69,12 @@ class SyncService:
         self._bc_config = bc_config
         self._auth = BCAuthService(bc_config)
         # Which endpoint family each service lives on ("odata" | "v2.0").
+        _services = load_web_services()
         self._api = BCApiService(
             bc_config, self._auth,
-            service_apis={s["name"]: s.get("api", "odata") for s in load_web_services()},
+            service_apis={s["name"]: s.get("api", "odata") for s in _services},
+            service_page_sizes={s["name"]: s["max_page_size"]
+                                for s in _services if s.get("max_page_size")},
         )
         self._db = SupabaseService(db_config)
 

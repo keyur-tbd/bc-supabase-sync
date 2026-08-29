@@ -49,6 +49,8 @@ jobs:
           BC_TENANT_ID: ${{ secrets.BC_TENANT_ID }}
           BC_ENVIRONMENT: ${{ secrets.BC_ENVIRONMENT }}
           BC_COMPANY_ID: ${{ secrets.BC_COMPANY_ID }}
+          # Per-service overrides live in config/web_services.json ("max_page_size").
+          BC_MAXPAGESIZE: ${{ vars.BC_MAXPAGESIZE || '5000' }}
           # Store the whole connection string as one secret. GitHub-hosted
           # runners have dynamic egress IPs, so if you restrict network
           # access on the Supabase side, use the pooler host rather than an
