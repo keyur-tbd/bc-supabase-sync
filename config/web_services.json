@@ -211,8 +211,8 @@
       "enabled": true
     },
     {
-      "_NOTE": "Chart of Accounts (page 16). 637 rows, no timestamp on the page -> full_refresh every run is cheap. Balance/Net_Change/Debit_Amount etc. are FlowFields computed at fetch time, so they reflect the whole ledger (no Date_Filter applied).",
-      "name": "Chart_of_Accounts",
+      "_NOTE": "Renamed 2026-08-29: BC web service re-published as Chart_of_Account (singular). Chart of Accounts (page 16). 637 rows, no timestamp on the page -> full_refresh every run is cheap. Balance/Net_Change/Debit_Amount etc. are FlowFields computed at fetch time, so they reflect the whole ledger (no Date_Filter applied).",
+      "name": "Chart_of_Account",
       "display_name": "Chart of Accounts",
       "object_type": "Page",
       "object_id": 16,
