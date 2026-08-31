@@ -4,7 +4,7 @@ on:
   schedule:
     # Every 2 hours. Adjust to taste — incremental syncs are cheap since
     # they only pull records changed since the last successful run.
-    - cron: "0 */2 * * *"
+    - cron: "58 */2 * * *"
   workflow_dispatch:
     inputs:
       mode:
