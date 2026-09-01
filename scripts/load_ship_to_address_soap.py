@@ -17,6 +17,9 @@ which the posted document stores with non-ASCII characters replaced by '?'.
 Paging is BC's bookmark scheme: ask for setSize rows, then repeat from the last
 row's Key until a short page comes back.
 
+Runs on schedule from .github/workflows/bc_sync.yml (step "Load ship-to
+addresses (SOAP)"), after the main sync. Also runnable by hand:
+
     python scripts/load_ship_to_address_soap.py
 """
 from __future__ import annotations

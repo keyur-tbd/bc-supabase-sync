@@ -77,6 +77,38 @@ jobs:
         run: |
           python app.py --mode ${{ github.event.inputs.mode || 'incremental' }}
 
+      # Ship-to Address is published for SOAP only in this tenant - it is absent
+      # from the OData V4 catalogue - so it cannot go through app.py's service
+      # loop and needs its own step. It feeds the Sales Register's GSTN and
+      # Ship to Name columns, which silently go stale without it.
+      #
+      # Runs AFTER the main sync on purpose: a SOAP outage must not stop the
+      # core data from syncing. `if: always()` so it still runs when the sync
+      # step fails, and its own failure is still reported.
+      #
+      # When OData V4 is enabled on that Web Services row: delete this step,
+      # delete the script, and set Ship_to_Address_Excel enabled in
+      # config/web_services.json.
+      - name: Load ship-to addresses (SOAP)
+        if: always()
+        env:
+          BC_CLIENT_ID: ${{ secrets.BC_CLIENT_ID }}
+          BC_CLIENT_SECRET: ${{ secrets.BC_CLIENT_SECRET }}
+          BC_TENANT_ID: ${{ secrets.BC_TENANT_ID }}
+          BC_ENVIRONMENT: ${{ secrets.BC_ENVIRONMENT }}
+          BC_COMPANY_ID: ${{ secrets.BC_COMPANY_ID }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_DB_SCHEMA: ${{ vars.SUPABASE_DB_SCHEMA || 'public' }}
+          SUPABASE_DB_SSLROOTCERT: ${{ github.workspace }}/prod-ca-2021.crt
+          SUPABASE_DB_SSLMODE: verify-full
+          PG_LOWERCASE_COLUMNS: ${{ vars.PG_LOWERCASE_COLUMNS || 'false' }}
+          SUPABASE_RAW_JSON_EXCLUDE_TABLES: >-
+            ${{ vars.SUPABASE_RAW_JSON_EXCLUDE_TABLES || '*' }}
+          SUPABASE_DISK_LIMIT_GB: ${{ vars.SUPABASE_DISK_LIMIT_GB || '18' }}
+          SUPABASE_DISK_STOP_PCT: ${{ vars.SUPABASE_DISK_STOP_PCT || '85' }}
+        run: |
+          python scripts/load_ship_to_address_soap.py
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v5

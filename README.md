@@ -665,11 +665,16 @@ entity sets), and its OData URL 404s. Every other service here is in both.
 `scripts/load_ship_to_address_soap.py` reads it over SOAP into
 `bc_ship_to_address` (2,335 rows, 2,159 with a GSTIN).
 
-**It is not part of the scheduled sync**, so ship-to changes do not refresh
-automatically - re-run the script when they matter. To fix properly: tick
-OData V4 on that Web Services row, flip the existing disabled
-`Ship_to_Address_Excel` entry in `web_services.json` to enabled, and delete the
-script.
+It **is** run on schedule: `bc_sync.yml` has a "Load ship-to addresses (SOAP)"
+step after the main sync, so ship-to registrations and names stay current
+without anyone remembering to run anything. It sits after the sync, with
+`if: always()`, so a SOAP outage cannot stop the core data from loading while
+its own failure is still reported.
+
+That step exists only because of the SOAP-only publication. Once OData V4 is
+ticked on that Web Services row: delete the workflow step, delete the script,
+and set `Ship_to_Address_Excel` to enabled in `web_services.json` - it then
+syncs like everything else.
 
 ### One-off repair
 
