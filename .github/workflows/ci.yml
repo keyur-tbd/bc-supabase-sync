@@ -62,7 +62,7 @@ jobs:
       - name: Validate config/web_services.json
         run: |
           python - <<'PY'
-          import json, sys
+          import datetime, json, sys
           d = json.load(open("config/web_services.json", encoding="utf-8"))
           services = d["services"]
           assert services, "no services defined"
@@ -94,6 +94,18 @@ jobs:
                   src = s.get("series_source") or {}
                   if src and not (src.get("table") and src.get("column")):
                       problems.append(f"{s['name']}: series_source needs both table and column")
+                  # date_column/min_date narrow a lines table to one financial
+                  # year. Half a pair silently does nothing, so require both.
+                  if bool(src.get("date_column")) != bool(src.get("min_date")):
+                      problems.append(f"{s['name']}: series_source needs date_column and min_date together")
+                  if src.get("min_date"):
+                      try:
+                          datetime.date.fromisoformat(src["min_date"])
+                      except (TypeError, ValueError):
+                          problems.append(f"{s['name']}: series_source.min_date must be YYYY-MM-DD")
+              sf = s.get("static_filter")
+              if sf is not None and not (isinstance(sf, str) and sf.strip()):
+                  problems.append(f"{s['name']}: static_filter must be a non-empty OData predicate")
               mps = s.get("max_page_size")
               if mps is not None and not (isinstance(mps, int) and not isinstance(mps, bool) and 1 <= mps <= 20000):
                   problems.append(f"{s['name']}: max_page_size must be an int 1..20000 (BC clamps above 20000)")

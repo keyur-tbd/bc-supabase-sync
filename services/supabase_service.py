@@ -399,12 +399,48 @@ class SupabaseService:
         with self._engine.connect() as conn:
             return {r[0]: r[1] for r in conn.execute(sql, {"sep": separator}).fetchall() if r[0]}
 
-    def distinct_series(self, table_name: str, column: str, separator: str = "-") -> set[str]:
+    def distinct_series(
+        self,
+        table_name: str,
+        column: str,
+        separator: str = "-",
+        date_column: str | None = None,
+        min_date: str | None = None,
+    ) -> set[str]:
         """Series prefixes present in `table_name`.`column`. Used to spot a
         series that exists on the parent document table but has no lines
         stored yet - BC rejects a "not (...)" filter, so a brand-new series
-        cannot be discovered from the API side."""
-        return set(self.max_by_series(table_name, column, separator).keys())
+        cannot be discovered from the API side.
+
+        With `date_column`/`min_date`, only series that have at least one
+        parent document on/after that date are returned. BC's no.-series are
+        financial-year scoped (26MUM- = FY25/26, 27MUM- = FY26/27), so this
+        is how a lines table is limited to one year: the whole point is to
+        never request the older series at all, because the lines pages carry
+        no date field to filter on.
+        """
+        if not (date_column and min_date):
+            return set(self.max_by_series(table_name, column, separator).keys())
+
+        col = normalize_column_name(column)
+        dcol = normalize_column_name(date_column)
+        existing = self._existing_columns(table_name)
+        if not existing:
+            return set()
+        if dcol not in existing:
+            raise ValueError(
+                f"series_source date_column {date_column!r} (column {dcol!r}) "
+                f"not found on {table_name}"
+            )
+        sql = text(
+            f"SELECT DISTINCT split_part({quote_ident(col)}, :sep, 1) AS series "
+            f"FROM {qualified_table(self._schema, table_name)} "
+            f"WHERE {quote_ident(col)} IS NOT NULL AND {quote_ident(col)} <> '' "
+            f"  AND {quote_ident(dcol)} >= CAST(:min_date AS DATE)"
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(sql, {"sep": separator, "min_date": min_date}).fetchall()
+        return {r[0] for r in rows if r[0]}
 
     # ---------- upserts ----------
 
