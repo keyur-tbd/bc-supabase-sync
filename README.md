@@ -508,7 +508,17 @@ no date floor.
 
     sql/01_ref_gst_state.sql                BC state code -> '27-MAHARASHTRA'
     sql/02_v_sales_register_gst_detail.sql  the view
-    sql/03_sales_register_indexes.sql       run once, after the first backfill
+    sql/03_sales_register_indexes.sql       indexes the view's joins need
+
+`scripts/apply_sql.py` applies all three, in filename order, and runs as a step
+in `bc_sync.yml` after every sync - so the deployed view always equals what is
+committed. Editing `sql/02_*.sql` and pushing is enough; there is no separate
+deploy. Every file is idempotent, so it is a no-op when nothing changed.
+
+It runs AFTER the sync because the view selects from the `bc_*` tables, which
+on a fresh database do not exist until the sync creates them. A rebuild is
+therefore self-healing: sync creates the tables, then the SQL step rebuilds the
+view, lookup and indexes on top.
 
 ### Validation against the BC register exports, April-August 2026
 

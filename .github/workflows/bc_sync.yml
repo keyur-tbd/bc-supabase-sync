@@ -109,6 +109,34 @@ jobs:
         run: |
           python scripts/load_ship_to_address_soap.py
 
+      # Keeps the deployed view / state lookup / indexes equal to what is in
+      # sql/. Without it they exist only because somebody ran them by hand, and
+      # editing sql/02_*.sql leaves the database serving the old definition
+      # silently. Every file is idempotent, so this is a no-op when unchanged.
+      #
+      # AFTER the sync on purpose: the view selects from the bc_* tables, so on
+      # a fresh database they must exist before it can be created.
+      - name: Apply sql/ (view, lookups, indexes)
+        if: always()
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_DB_SCHEMA: ${{ vars.SUPABASE_DB_SCHEMA || 'public' }}
+          SUPABASE_DB_SSLROOTCERT: ${{ github.workspace }}/prod-ca-2021.crt
+          SUPABASE_DB_SSLMODE: verify-full
+          PG_LOWERCASE_COLUMNS: ${{ vars.PG_LOWERCASE_COLUMNS || 'false' }}
+          SUPABASE_RAW_JSON_EXCLUDE_TABLES: >-
+            ${{ vars.SUPABASE_RAW_JSON_EXCLUDE_TABLES || '*' }}
+          SUPABASE_DISK_LIMIT_GB: ${{ vars.SUPABASE_DISK_LIMIT_GB || '18' }}
+          SUPABASE_DISK_STOP_PCT: ${{ vars.SUPABASE_DISK_STOP_PCT || '85' }}
+          # config.py requires these at import time even though no BC call is made.
+          BC_CLIENT_ID: ${{ secrets.BC_CLIENT_ID }}
+          BC_CLIENT_SECRET: ${{ secrets.BC_CLIENT_SECRET }}
+          BC_TENANT_ID: ${{ secrets.BC_TENANT_ID }}
+          BC_ENVIRONMENT: ${{ secrets.BC_ENVIRONMENT }}
+          BC_COMPANY_ID: ${{ secrets.BC_COMPANY_ID }}
+        run: |
+          python scripts/apply_sql.py
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v5
