@@ -28,6 +28,7 @@ import logging
 import re
 import sys
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 
 import requests
 
@@ -37,6 +38,7 @@ from config import load_bc_config, load_supabase_config
 from services.auth_service import BCAuthService
 from services.supabase_service import SupabaseService
 from utils.logger import setup_logger
+from utils.retry_helper import RetryableHTTPError, retry_with_backoff
 
 logger = logging.getLogger("bc_sync")
 
@@ -58,17 +60,31 @@ def endpoint(cfg) -> str:
             f"{requests.utils.quote(cfg.company_id)}/Page/{SERVICE}")
 
 
+@retry_with_backoff(max_attempts=5, base_delay=2.0)
 def read_page(url, token, bookmark=None):
+    """One ReadMultiple page.
+
+    BC's SOAP endpoint returns a bare 500 intermittently - a full pass
+    succeeded locally and then failed on page 2 from a GitHub runner minutes
+    later, same data. Treat 5xx/429 as retryable rather than letting a blip
+    fail the whole workflow; a genuine fault still surfaces after 5 attempts.
+    """
     body = ('<?xml version="1.0"?>'
             '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body>'
             f'<ReadMultiple xmlns="{NS}"><filter/>'
-            + (f"<bookmarkKey>{bookmark}</bookmarkKey>" if bookmark else "")
+            + (f"<bookmarkKey>{escape(bookmark)}</bookmarkKey>" if bookmark else "")
             + f"<setSize>{PAGE}</setSize></ReadMultiple></soap:Body></soap:Envelope>")
-    r = requests.post(url, timeout=300,
-                      headers={"Authorization": f"Bearer {token}",
-                               "Content-Type": "text/xml; charset=utf-8",
-                               "SOAPAction": f"{NS}:ReadMultiple"},
-                      data=body.encode("utf-8"))
+    try:
+        r = requests.post(url, timeout=300,
+                          headers={"Authorization": f"Bearer {token}",
+                                   "Content-Type": "text/xml; charset=utf-8",
+                                   "SOAPAction": f"{NS}:ReadMultiple"},
+                          data=body.encode("utf-8"))
+    except requests.RequestException as exc:
+        raise RetryableHTTPError(f"Network error calling BC SOAP: {exc}") from exc
+    if r.status_code == 429 or r.status_code >= 500:
+        raise RetryableHTTPError(
+            f"BC SOAP returned {r.status_code} for {SERVICE}", status_code=r.status_code)
     r.raise_for_status()
     root = ET.fromstring(r.text)
     rows, last_key = [], None
