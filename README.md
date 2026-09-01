@@ -30,10 +30,12 @@ BC):
 | `Vendor_Ledger_Entries_Excel` | `bc_vendor_ledger_entries` | date | `Posting_Date` | `Posting_Date` + extra pass on `Closed_at_Date` |
 | `Sales_Price_Lists_Excels` (Sales Price List card, page 7000) | `bc_sales_price_lists` | full_refresh | — | — |
 | `Sales_Price_Lists_ExcelsLines` (its lines subpage — the customer price list) | `bc_sales_price_list_lines` | full_refresh | — | — |
-| `Posted_Sales_Invoice_ExcelSalesInvLines` (**disabled**, see *Parked work*) | `bc_posted_sales_invoice_lines` | series_key | — | `Document_No` |
-| `Posted_Sales_Credit_Memo_ExcelSalesCrMemoLines` (**disabled**, see *Parked work*) | `bc_posted_sales_cr_memo_lines` | series_key | — | `Document_No` |
-| `Detailed_GST_Ledger_Entry_Excel` (**disabled**, see *Parked work*) | `bc_detailed_gst_ledger_entries` | date | `Posting_Date` | `Posting_Date` |
-| `Customer_Card_Excel` (**disabled**, see *Parked work*) | `bc_customer_card` | full_refresh | — | — |
+| `Posted_Sales_Invoice_ExcelSalesInvLines` (FY 2026-27 series only) | `bc_posted_sales_invoice_lines` | series_key | — | `Document_No` |
+| `Posted_Sales_Credit_Memo_ExcelSalesCrMemoLines` (FY 2026-27 series only) | `bc_posted_sales_cr_memo_lines` | series_key | — | `Document_No` |
+| `Detailed_GST_Ledger_Entry_Excel` | `bc_detailed_gst_ledger_entries` | date | `Posting_Date` | `Posting_Date` |
+| `Customer_Card_Excel` | `bc_customer_card` | full_refresh | — | — |
+| `Value_Entries_Excel` (sales entries only, `static_filter`) | `bc_value_entries` | date | `Posting_Date` | `Posting_Date` |
+| `Item_Card_Excel` | `bc_item_card` | full_refresh | — | — |
 
 > Sales Return Order is an open (un-posted) document, so it has no posting
 > date — it is chunked/incremented on `Document_Date` instead. GL uses
@@ -496,27 +498,184 @@ the original table is untouched if a rewrite fails. On 2026-08-29 it took
 the database from 9.0 GB to 7.5 GB (credit-memo lines 419 → 98 MB; GL and
 item ledger were already lean because they never stored raw JSON).
 
-## Parked work: Sales Register GST Detail
+## Sales Register GST Detail
 
-The partner report *Sales Register GST Detail* (report 74365) cannot be
-fetched as a report, but everything it prints is available from published
-pages and can be rebuilt as a Supabase view: header fields from the posted
-invoice / credit-memo tables, line fields from
-`Posted_Sales_Invoice_ExcelSalesInvLines` /
-`Posted_Sales_Credit_Memo_ExcelSalesCrMemoLines`, and the GST split
-(HSN, group, %, base, IGST/CGST/SGST, place of supply, GSTINs) from
-`Detailed_GST_Ledger_Entry_Excel` (one row per line per component, joined
-on `Document_No` + `Document_Line_No`; report amounts are `-1 ×` the
-ledger's). Verified against an April-2026 export: ~65 of 70 columns map
-exactly. Decisions taken: MRP comes from
-`bc_sales_price_list_lines.Unit_Price` (current list price, so historical
-months may differ), transfer-shipment rows are not needed (P&L use only),
-TCS is 0, COGS needs reconciliation against Value Entries, and state names
-(`24-GUJARAT`) need a 36-row state lookup.
+BC partner report 74365 cannot be fetched as a report, so it is rebuilt as a
+Supabase view, `v_sales_register_gst_detail`, whose columns carry the report's
+own headers verbatim. Built 2026-08-31, **scoped to FY 2026-27** (from
+2026-04-01); the source services are limited to that year, the view itself has
+no date floor.
 
-The four source services are in `config/web_services.json` with
-`"enabled": false` and are **not to be re-enabled until the Supabase disk
-has room** for roughly 0.7 GB (current FY only) to 2.5 GB (from
-2025-04-01). The rebuild was paused on the user's instruction after the
-disk incident above.
+    sql/01_ref_gst_state.sql                BC state code -> '27-MAHARASHTRA'
+    sql/02_v_sales_register_gst_detail.sql  the view
+    sql/03_sales_register_indexes.sql       run once, after the first backfill
 
+### Validation against the BC register exports, April-August 2026
+
+Checked row by row against the report's own monthly output (transfer shipments
+excluded). **Row counts are identical in all five months, with no unmatched
+keys**, and every money column except GMV ties to the paisa:
+
+| month | rows (export = view) | columns exact |
+|---|---:|---:|
+| April | 69,194 | 63 of 70 |
+| May | 67,839 | 62 of 70 |
+| June | 65,890 | 64 of 70 |
+| July | 73,485 | 62 of 70 |
+| August | 74,762 | 62 of 70 |
+
+Differing cells, all five months together: **12,417 of ~24.6 million**. Of those,
+9,514 are E-Way Bill No. (excluded on the user's instruction) and 2,456 are July
+COGS (the export is stale, not the view - see below), leaving a **residual of
+447 cells, 0.0018%**:
+
+| column | total | why |
+|---|---:|---|
+| MRP / GMV | 94 / 93 | best of every derivation tested; see below |
+| GSTN | 79 | ship-to registration changed after posting |
+| GST HSN/SAC + Group Code | 93 | item card is current; these rows repriced |
+| GST Jurisdiction Type | 36 | lines with no GST ledger entry |
+| Ship to Address Code | 36 | header and report disagree |
+| GST Place of Supply / State | 16 | lines with no GST ledger entry |
+
+Money totals, export vs view - **0.00 difference on all of these, every month**:
+Quantity, AmountLCY, Discount, GST Base Amount, IGST, CGST, SGST, Amount To
+Customer, and COGS (four of five months - see below).
+
+    April    Quantity 3,173,522.32   AmountLCY 214,094,152.83   ATC 151,375,670.74
+    May      Quantity 3,049,486.86   AmountLCY 223,983,058.97   ATC 156,509,152.33
+    June     Quantity 2,522,459.32   AmountLCY 198,549,002.81   ATC 143,593,500.49
+    July     Quantity 3,388,275.90   AmountLCY 259,564,500.17   ATC 186,469,577.89
+    August   Quantity 3,358,948.82   AmountLCY 268,756,010.14   ATC 194,447,496.86
+
+**April alone was not a validation.** Three defects survived the April check and
+only surfaced on the later months: MRP (see below), the debit-note G/L rule, and
+the Customer State fallback. Re-run every month after any change to this view -
+`compare_month.py` in the session scratchpad, or rebuild it from this README.
+
+### What the report actually does - things worth knowing before changing the view
+
+Every one of these was found by the row-by-row comparison, and several are
+counter-intuitive enough that a plausible-looking "simplification" would break
+the register:
+
+-   **The lines drive the view, not the GST ledger.** 8,358 April rows (542
+    invoice, 7,816 credit memo) have no Detailed GST Ledger entry at all and
+    the report still prints them. Exempt lines on an *invoice* get 0% ledger
+    entries; the same lines on a *credit memo* mostly do not. A ledger-driven
+    join silently loses two thirds of the credit-memo rows.
+-   **Credit-memo lines are stored POSITIVE in BC** (58,413 positive, 0
+    negative across FY 2026-27) and printed negative. Passing them through
+    unchanged adds 18.4M to April's sales instead of netting it off.
+-   **GMV is a magnitude**, even on credit memos: April's credit-memo GMV is
+    +15,292,577 against a quantity of -273,955. Every other amount on those
+    rows is signed.
+-   **AmountLCY is `Line_Amount + Line_Discount_Amount`**, not
+    `ROUND(Quantity x Unit_Price, 2)`. BC rounds the line then adds the
+    discount back; the two differ by a paisa on 2,657 of April's 57,227
+    invoice lines (7.73 in total).
+-   **GST Base Amount is the LINE's amount, never the ledger's
+    `GST_Base_Amount`.** They diverge by a few paise on 9 rows and the line
+    wins every time. Amount To Customer follows from it.
+-   **GSTN is the customer's registration in the SHIP-TO state** (69,097 of
+    69,194 rows; the rest are unregistered B2C and print blank). The ledger's
+    own per-line `Buyer_Seller_Reg_No` is not that value on 4,860 rows.
+-   **"Cancelled" on a credit memo is the `Corrective` flag**, not `Cancelled`.
+-   **Name comes from the customer card**, not the posted document (card
+    matches 69,194 of 69,194, document 69,147 - a customer renamed since
+    posting).
+-   **Description comes from the item master**, not the line (68,586 of 68,586
+    vs 68,565): the line keeps the text that was current at posting.
+-   **G/L account lines are not always printed as G/L lines.** BC posts sales
+    returns to account 35120010 while keeping the item in `Item_No`, and the
+    report then prints the ITEM, its master description, its HSN and GGST-0%.
+    Three rules, exact on April's 608 G/L rows: invoice -> the account number
+    (494); credit memo with `Item_No` -> the item (73); credit memo without ->
+    nothing at all (41). MRP, GMV and COGS are 0 on all three.
+-   **HSN/SAC and GST Group Code come from the Item Card** (page 30), which
+    matches the report on all 8,317 April rows that have no ledger entry, and
+    is the only source covering the 3 items that appear nowhere in the ledger.
+-   **Place of supply falls back to 'Ship-to Address', NOT to the document.**
+    Measured: line ledger value else 'Ship-to Address' is wrong on 4 rows,
+    routing through the document is wrong on 14. Jurisdiction is the opposite -
+    there the document fallback helps (11 wrong vs 14) - so the two are
+    deliberately asymmetric.
+-   **MRP is DERIVED FROM THE LINE, never read from the item ledger.**
+    `GMV = Line_Discount_Amount / (Line_Discount_Percent / 100)` and
+    `MRP = GMV / Quantity`. The item ledger's MRP is stamped when goods move and
+    goes stale the moment an item reprices - FG/0129 went 40 -> 45 on
+    2026-05-13 and the ledger keeps saying 40 for invoices posted after it.
+    Measured over 347,269 item rows: derived->ledger->unit price 110 wrong;
+    derived->ledger 144; derived->unit price 239; **ledger alone 7,378**. The
+    ledger alone looked fine on April (49 wrong) and collapsed in May (3,953).
+-   **GSTN is the ship-to address's registration**, from `bc_ship_to_address`
+    (loaded over SOAP - see below). Precedence matters: the GST ledger's own
+    value wins when it is ALREADY a registration in the ship-to state, because
+    that is the value as at posting and the ship-to master is live. Putting the
+    master first instead cost 278 rows in April alone.
+-   **Ship to Name is the DOCUMENT's**, not the ship-to master's - it is frozen
+    at posting and legitimately differs from the current record. Preferring the
+    master broke 59,032 rows (every credit memo). The only repair needed is
+    BC's OData layer transliterating non-ASCII to '?': `REPLACE(name, '?',
+    chr(8211))` restores the en-dash on the 35 affected headers.
+-   **COGS comes from Value Entries** and nothing else. `bc_item_ledger_entries`
+    cannot be joined to a posted document line - its `Document_No` is the
+    SHIPMENT number (`27SSHIP-...`). COGS is printed positive on credit memos
+    too, so its sign comes from the document type, not the ledger.
+-   **Invoice Date is blank on credit memos**; Return Reason Code is blank on
+    invoices; G/L account lines print no Description and 0 for MRP/GMV/COGS.
+-   BC's `0001-01-01` "no date" must be rendered blank.
+
+### Known gaps (0.045% of cells; both need a change in BC)
+
+| column | rows | why |
+|---|---:|---|
+| E-Way Bill No. | 1,585 | Page 134 exposes **no e-way bill field at all** (verified against the live OData catalogue), so credit-memo e-way bill numbers cannot be sourced. **Excluded on the user's instruction 2026-09-01** - not needed. Fix if ever wanted: add the field to page 134 in BC. |
+| GSTN | 445 | Customers whose ship-to-state GSTIN never appears in the GST ledger - BC recorded the bill-to GSTIN there instead. The authoritative source is the Ship-to Address table. `Ship_to_Address_Excel` returns **404 and is absent from the 119 entity sets the OData catalogue lists**, so it is not reachable on this endpoint. **Fix: confirm that its Web Services row is Published and exposed for OData V4 (a SOAP-only row does not appear), then enable the existing disabled config entry.** |
+| MRP / GMV (no MRP at all) | 39 | `SALVAGE`, `PM/0196`, `PM/0272` - a salvage item and two packaging materials, which carry no MRP in any source. **Accepted on the user's instruction 2026-09-01: the rows stay in the register with MRP/GMV 0, and this is not to be chased.** The same applies to any future `PM/` or `RM/` item. Note these are the only `Type = 'Item'` rows without an MRP; the ~3,900 `G/L Account` rows that also show 0 are correct - the report prints 0 there by design. |
+| MRP / GMV (wrong MRP) | 48 each | The document was billed at an older MRP than `bc_item_ledger_entries` recorded (27AHD-00438: ledger 55/80/70/55, report 49/75/65/49). Measured against alternatives, the linked item-ledger entry is right on 69,145 rows; item-card Unit_Price manages 3,463 and the item's modal ledger MRP 33,330. No available source carries the report's value. |
+| GST Jurisdiction Type / Place of Supply / GST State | 11 / 4 / 1 | Lines with no ledger entry, where neither fallback recovers the report's value. |
+| Ship to Name | 3 | BC itself stores `D-MART ? AGARWAL...`; the April export has an en-dash. Source-data difference, not a sync fault - the register follows BC. |
+
+**Transfer Shipment rows are not produced.** The report prints them (5,477 of
+April's 74,671) but they carry no customer, no GST and no COGS, and the
+2026-08-28 decision was that the register is for P&L use. Adding them means a
+third UNION branch off a transfer-shipment page, which is not synced.
+
+### Scoping the pull to one financial year
+
+BC no.-series are FY-scoped (`26AHD-` = FY25/26, `27AHD-` = FY26/27) and the
+posted-lines pages carry **no date field**, so the only way to bound them is to
+bound which series are requested. `series_source.date_column` + `min_date` do
+that: the parent header table, filtered to `min_date`, defines the scope
+(12 invoice and 7 credit-memo series, all `27*`). To extend the register
+backwards, lower `min_date` and `sync_start_date` together and re-run those
+services with `--mode full`; budget roughly 0.9 GB per additional year.
+
+`Value_Entries_Excel` uses the other new option, `static_filter` - an OData
+predicate AND-ed into every request for a service. `Item_Ledger_Entry_Type eq
+'Sale'` keeps the purchase/output/consumption/adjustment entries out of the
+database entirely: 714k rows instead of 1.17M for FY 2026-27.
+
+### Ship-to Address is SOAP-only in this tenant
+
+`Ship_to_Address_Excel` (page 300) is published, but for **SOAP only**: it is in
+the SOAP catalogue (78 services) and absent from the OData V4 catalogue (119
+entity sets), and its OData URL 404s. Every other service here is in both.
+`scripts/load_ship_to_address_soap.py` reads it over SOAP into
+`bc_ship_to_address` (2,335 rows, 2,159 with a GSTIN).
+
+**It is not part of the scheduled sync**, so ship-to changes do not refresh
+automatically - re-run the script when they matter. To fix properly: tick
+OData V4 on that Web Services row, flip the existing disabled
+`Ship_to_Address_Excel` entry in `web_services.json` to enabled, and delete the
+script.
+
+### One-off repair
+
+`scripts/repair_mojibake.py` re-fetched 2,398 header rows whose text was
+mangled by the August-2026 MySQL -> Supabase CSV migration (U+FFFD where a
+non-breaking space belonged). Not an ongoing bug: the BC API returns the
+character correctly, `client_encoding` and `server_encoding` are both UTF8, and
+every table written only by the BC sync is clean. Re-run it if any other
+migrated table shows the same damage.

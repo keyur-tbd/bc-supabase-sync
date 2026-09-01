@@ -75,6 +75,8 @@ class SyncService:
             service_apis={s["name"]: s.get("api", "odata") for s in _services},
             service_page_sizes={s["name"]: s["max_page_size"]
                                 for s in _services if s.get("max_page_size")},
+            service_static_filters={s["name"]: s["static_filter"]
+                                    for s in _services if s.get("static_filter")},
         )
         self._db = SupabaseService(db_config)
 
@@ -330,12 +332,28 @@ class SyncService:
         if mode == "full":
             highs = {}   # re-pull every in-scope series from its start
         if src.get("table") and src.get("column"):
-            discovered = self._db.distinct_series(src["table"], src["column"], sep)
+            date_column = src.get("date_column")
+            min_date = src.get("min_date")
+            discovered = self._db.distinct_series(
+                src["table"], src["column"], sep,
+                date_column=date_column, min_date=min_date,
+            )
             new = discovered - series
             if new:
                 logger.info(f"[{name}] Series-key: {len(new)} new series from "
                             f"{src['table']}: {sorted(new)}")
-            series |= discovered
+            if date_column and min_date:
+                # The parent table, filtered to min_date, IS the scope. Union
+                # would drag back the pre-min_date series the moment one of
+                # their rows appeared, and these pages have no date field to
+                # re-filter on, so intersect instead.
+                dropped = series - discovered
+                if dropped:
+                    logger.info(f"[{name}] Series-key: {len(dropped)} series out of scope "
+                                f"(no {src['table']}.{date_column} >= {min_date}): {sorted(dropped)}")
+                series = discovered
+            else:
+                series |= discovered
 
         logger.info(f"[{name}] Series-key on {field}: {len(series)} series, "
                     f"one request each, above each series' stored maximum.")

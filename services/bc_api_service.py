@@ -45,7 +45,8 @@ BC_MAX_PAGE_SIZE = 20000
 class BCApiService:
     def __init__(self, bc_config: BCConfig, auth_service: BCAuthService,
                  service_apis: dict[str, str] | None = None,
-                 service_page_sizes: dict[str, int] | None = None):
+                 service_page_sizes: dict[str, int] | None = None,
+                 service_static_filters: dict[str, str] | None = None):
         self._config = bc_config
         self._auth = auth_service
         self._session = requests.Session()
@@ -56,6 +57,16 @@ class BCApiService:
         self._service_page_sizes = {
             k: max(1, min(int(v), BC_MAX_PAGE_SIZE))
             for k, v in (service_page_sizes or {}).items() if v
+        }
+        # service name -> OData predicate AND-ed into EVERY request for that
+        # service, on top of whatever the strategy computes. For entities
+        # where only a slice is wanted and the slice is not a date: e.g.
+        # Value_Entries_Excel holds purchases, output, consumption and
+        # adjustments as well as sales, and only the sales half feeds the
+        # Sales Register. Filtering server-side keeps the rows out of the
+        # database entirely rather than storing then ignoring them.
+        self._service_static_filters = {
+            k: v for k, v in (service_static_filters or {}).items() if v
         }
         self._company_guid_cache: str | None = None
 
@@ -101,6 +112,15 @@ class BCApiService:
         # working across the full dataset.
         url = self._entity_base_url(service_name)
         params = []
+        # The static filter is combined here rather than at each call site so
+        # no strategy can forget it - including full_refresh, which passes no
+        # filter of its own. Both sides are parenthesised because a computed
+        # filter can itself contain a top-level "or".
+        static = self._service_static_filters.get(service_name)
+        if static and odata_filter:
+            odata_filter = f"({odata_filter}) and ({static})"
+        elif static:
+            odata_filter = static
         if odata_filter:
             params.append(f"$filter={odata_filter}")
         # $orderby matters for the series_key strategy: its watermark is the
