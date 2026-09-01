@@ -367,6 +367,19 @@ class SupabaseService:
             logger.info(f"Widening column(s) on {table_name}: "
                         + ", ".join(f"{c}->{t}" for c, t in promotions))
             with self._engine.begin() as conn:
+                # Postgres refuses ALTER COLUMN ... TYPE on a column any view
+                # selects, so a reporting view built on a bc_* table would
+                # otherwise block ingestion outright - not just the widening.
+                # The whole page fails, every row counts as failed, and nothing
+                # in the log says "a view is in the way". Drop the dependents,
+                # widen, put them back; all inside this one transaction, so a
+                # failure anywhere leaves both the type and the views untouched.
+                views = self._dependent_views(conn, table_name)
+                if views:
+                    logger.info(f"Dropping {len(views)} dependent view(s) to widen "
+                                f"{table_name}: {', '.join(v for v, _ in views)}")
+                    for name, _definition in views:
+                        conn.execute(text(f"DROP VIEW IF EXISTS {name} CASCADE"))
                 for col, target in promotions:
                     conn.execute(
                         text(
@@ -374,7 +387,49 @@ class SupabaseService:
                             f"ALTER COLUMN {quote_ident(col)} TYPE {target}"
                         )
                     )
+                # Recreate innermost-first: _dependent_views returns them
+                # outermost-first so dropping cascades cleanly.
+                for name, definition in reversed(views):
+                    conn.execute(text(f"CREATE VIEW {name} AS {definition}"))
+                if views:
+                    logger.info(f"Recreated {len(views)} view(s) on {table_name}.")
             self._json_columns.pop(table_name, None)
+
+    def _dependent_views(self, conn, table_name: str) -> list[tuple[str, str]]:
+        """Views that depend on `table_name`, outermost first, as
+        [(qualified_name, definition)].
+
+        Walks pg_depend -> pg_rewrite transitively so a view built on a view is
+        included too. The definitions come from pg_get_viewdef, which is what
+        Postgres itself would emit, so recreating is faithful.
+        """
+        sql = text("""
+            WITH RECURSIVE dependents AS (
+                SELECT DISTINCT r.ev_class AS oid, 1 AS depth
+                FROM pg_depend d
+                JOIN pg_rewrite r ON r.oid = d.objid
+                WHERE d.refobjid = CAST(:tbl AS regclass)
+                  AND d.classid = CAST('pg_rewrite' AS regclass)
+                  AND r.ev_class <> CAST(:tbl AS regclass)
+                UNION
+                SELECT DISTINCT r.ev_class, dp.depth + 1
+                FROM dependents dp
+                JOIN pg_depend d ON d.refobjid = dp.oid
+                JOIN pg_rewrite r ON r.oid = d.objid
+                WHERE d.classid = CAST('pg_rewrite' AS regclass)
+                  AND r.ev_class <> dp.oid
+            )
+            SELECT c.oid::regclass::text AS name,
+                   pg_get_viewdef(c.oid, true) AS definition,
+                   MAX(dp.depth) AS depth
+            FROM dependents dp
+            JOIN pg_class c ON c.oid = dp.oid
+            WHERE c.relkind IN ('v', 'm')
+            GROUP BY 1, 2
+            ORDER BY depth DESC
+        """)
+        qualified = f"{self._schema}.{table_name}"
+        return [(r[0], r[1]) for r in conn.execute(sql, {"tbl": qualified}).fetchall()]
 
     def max_by_series(self, table_name: str, column: str, separator: str = "-") -> dict[str, str]:
         """{series_prefix: highest value seen} for `column`, where the prefix
