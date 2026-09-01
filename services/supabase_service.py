@@ -627,6 +627,27 @@ class SupabaseService:
         )
         conflict_target = ", ".join(quote_ident(c) for c in pk_cols)
 
+        # Skip updates that would change nothing. A full_refresh service
+        # re-sends its whole table every run (Customer_Item_Reference_Excel is
+        # 140k rows every 2 hours, and the page exposes no timestamp to sync
+        # incrementally on), and a date service re-sends its lookback window;
+        # without this, each pass rewrites every row and leaves that many dead
+        # tuples for autovacuum. Comparing the payload columns as a row
+        # constructor makes an unchanged row a no-op at zero write cost.
+        #
+        # _synced_at is deliberately NOT in the comparison - it changes every
+        # run by construction, so including it would defeat the whole thing.
+        # The consequence is that _synced_at now means "when this row last
+        # CHANGED", not "when we last looked at it".
+        compare_cols = [c for c in update_cols if c != SYNCED_AT_COL]
+        if compare_cols:
+            tbl = qualified_table(self._schema, table_name)
+            lhs = ", ".join(f"{tbl}.{quote_ident(c)}" for c in compare_cols)
+            rhs = ", ".join(f"EXCLUDED.{quote_ident(c)}" for c in compare_cols)
+            skip_unchanged = f" WHERE ({lhs}) IS DISTINCT FROM ({rhs})"
+        else:
+            skip_unchanged = ""
+
         # ONE multi-row INSERT per batch instead of executemany (one round
         # trip per row through the transaction pooler, which made wide line
         # tables crawl at ~50 rows/s). Positional %s placeholders go straight
@@ -645,6 +666,7 @@ class SupabaseService:
                     f"INSERT INTO {qualified_table(self._schema, table_name)} ({col_list}) "
                     f"VALUES {', '.join([row_tpl] * len(chunk))} "
                     f"ON CONFLICT ({conflict_target}) DO UPDATE SET {update_clause}"
+                    f"{skip_unchanged}"
                 )
                 conn.exec_driver_sql(sql, params)
 

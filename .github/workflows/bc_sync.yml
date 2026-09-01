@@ -72,7 +72,7 @@ jobs:
           # small ones keep it as a debugging safety net.
           SUPABASE_RAW_JSON_EXCLUDE_TABLES: >-
             ${{ vars.SUPABASE_RAW_JSON_EXCLUDE_TABLES || '*' }}
-          SUPABASE_DISK_LIMIT_GB: ${{ vars.SUPABASE_DISK_LIMIT_GB || '18' }}
+          SUPABASE_DISK_LIMIT_GB: ${{ vars.SUPABASE_DISK_LIMIT_GB || '30' }}
           SUPABASE_DISK_STOP_PCT: ${{ vars.SUPABASE_DISK_STOP_PCT || '85' }}
         run: |
           python app.py --mode ${{ github.event.inputs.mode || 'incremental' }}
@@ -104,7 +104,7 @@ jobs:
           PG_LOWERCASE_COLUMNS: ${{ vars.PG_LOWERCASE_COLUMNS || 'false' }}
           SUPABASE_RAW_JSON_EXCLUDE_TABLES: >-
             ${{ vars.SUPABASE_RAW_JSON_EXCLUDE_TABLES || '*' }}
-          SUPABASE_DISK_LIMIT_GB: ${{ vars.SUPABASE_DISK_LIMIT_GB || '18' }}
+          SUPABASE_DISK_LIMIT_GB: ${{ vars.SUPABASE_DISK_LIMIT_GB || '30' }}
           SUPABASE_DISK_STOP_PCT: ${{ vars.SUPABASE_DISK_STOP_PCT || '85' }}
         run: |
           python scripts/load_ship_to_address_soap.py
@@ -126,7 +126,7 @@ jobs:
           PG_LOWERCASE_COLUMNS: ${{ vars.PG_LOWERCASE_COLUMNS || 'false' }}
           SUPABASE_RAW_JSON_EXCLUDE_TABLES: >-
             ${{ vars.SUPABASE_RAW_JSON_EXCLUDE_TABLES || '*' }}
-          SUPABASE_DISK_LIMIT_GB: ${{ vars.SUPABASE_DISK_LIMIT_GB || '18' }}
+          SUPABASE_DISK_LIMIT_GB: ${{ vars.SUPABASE_DISK_LIMIT_GB || '30' }}
           SUPABASE_DISK_STOP_PCT: ${{ vars.SUPABASE_DISK_STOP_PCT || '85' }}
           # config.py requires these at import time even though no BC call is made.
           BC_CLIENT_ID: ${{ secrets.BC_CLIENT_ID }}
