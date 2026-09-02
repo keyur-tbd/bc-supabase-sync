@@ -668,6 +668,104 @@ predicate AND-ed into every request for a service. `Item_Ledger_Entry_Type eq
 'Sale'` keeps the purchase/output/consumption/adjustment entries out of the
 database entirely: 714k rows instead of 1.17M for FY 2026-27.
 
+### Disk alerts and auto-budgeting - START HERE if you got an email
+
+**You got an email titled `[WARN]` or `[STOP] Supabase disk - <pipeline>`.
+What now?**
+
+The email says which pipeline, how much it is using, and its budget. Three
+things you might do, all one line, none needing a deploy or a code change:
+
+```sql
+-- 1. That pipeline genuinely needs more room, and the volume has space:
+UPDATE etl_disk_policy SET budget_gb = 30 WHERE pipeline = 'marketplace';
+
+-- 2. You resized the Supabase volume (do this EVERY time you resize):
+UPDATE etl_disk_policy SET budget_gb = 100 WHERE pipeline = '_disk';
+
+-- 3. Somebody else should get these emails too:
+UPDATE etl_alert_config SET recipients = ARRAY['birbal@thebakersdozen.in','x@y.com'];
+```
+
+If it was a `[STOP]`, that pipeline is refusing to write until you do one of
+the above (or free space). Nothing is lost - it exits before writing and the
+next run continues where it left off.
+
+**Why you might get an email even though nobody changed anything:** the volume
+fills up. A pipeline you have not touched in months can cross its budget purely
+because it kept collecting data.
+
+#### What is actually running
+
+    every pipeline run
+        └─ guard("bc_sync")            <- etl_alerts.py, two lines in app.py
+             ├─ etl_disk_autobudget()  grow budgets into FREE space first
+             ├─ etl_disk_check()       'ok' | 'warn' | 'stop'
+             ├─ email (once per cooldown, immediately if it got worse)
+             └─ raise DiskGuardStop    if 'stop'
+
+`etl_alerts.py` is **identical in every pipeline repo**. Do not add per-repo
+logic to it. Everything configurable is in the database:
+
+| table | holds |
+|---|---|
+| `etl_disk_policy` | budgets, which tables belong to which pipeline, thresholds |
+| `etl_alert_config` | who gets emailed, and how often at most (default 12h) |
+| `etl_alert_state` | what you were last told, so you are not mailed hourly |
+
+#### Auto-budgeting, and why it is not just "turn the guard off"
+
+A budget that grows whenever it is hit would not be a guard. So
+`etl_disk_autobudget()` only ever hands out space that is genuinely
+**unallocated** - the gap between the sum of all budgets and the volume's stop
+threshold. Currently budgets total 36 GB against a 42.5 GB ceiling, so 6.5 GB
+is free to distribute. A pipeline that is growing takes from that automatically
+instead of paging you at 3am about a number somebody guessed in September.
+Once the volume is fully allocated there is nothing to hand out, expansion
+stops, and the guard bites exactly as before. **It can never raise the total
+past the stop threshold.**
+
+Proof that it works: while testing this, an attempt to trigger a warning
+*failed* because the budget correctly grew 6.2 -> 8.0 GB and returned `ok`. The
+volume ceiling had to be forced below actual usage to produce a real stop.
+
+#### New data nobody budgeted for
+
+`etl_unbudgeted_tables(min_gb)` lists tables no pipeline pattern claims. They
+are still governed by the volume ceiling - guarded, just not budgeted - and any
+above 0.5 GB are listed in the alert email. To adopt one, add a pattern:
+
+```sql
+UPDATE etl_disk_policy
+   SET table_pattern = table_pattern || '{^newthing_}'
+ WHERE pipeline = 'marketplace';
+```
+
+#### Email: why Gmail OAuth and not SMTP
+
+`thebakersdozen.in` is Google Workspace (checked the MX records), so the
+Business Central Entra app cannot send as that mailbox - Graph returns
+`ErrorInvalidUser` because there is no Exchange mailbox. Gmail app passwords
+are disabled on this Workspace. A service account would need domain-wide
+delegation. What is left, and what this uses, is an ordinary OAuth client from
+the `mail-grn` Google project with the **`gmail.send` scope only** - permission
+to send, not to read.
+
+Four GitHub secrets: `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`,
+`GMAIL_REFRESH_TOKEN`, `GMAIL_SENDER`. **Without them nothing breaks** - the
+guard still stops the pipeline, it just logs instead of emailing.
+
+To mint a new refresh token (they can be revoked, and then alerts go quiet
+without anything else failing):
+
+```bash
+python scripts/gmail_authorize.py "path/to/client_secret_*.json"
+```
+
+It prints the exact `gh secret set` commands. Run it in a normal terminal - the
+refresh token is a credential and should not end up in a transcript or a
+commit.
+
 ### Disk policy is shared across pipelines
 
 This Supabase volume is shared by several pipelines the same person maintains:

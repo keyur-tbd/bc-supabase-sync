@@ -27,6 +27,7 @@ import logging
 import sys
 
 from config import ConfigError, load_bc_config, load_supabase_config
+from etl_alerts import DiskGuardStop, guard
 from services.sync_service import SyncService
 from utils.logger import log_run_summary, setup_logger
 
@@ -66,6 +67,20 @@ def main() -> int:
     except ConfigError as exc:
         logger.error(f"Configuration error: {exc}")
         return 1
+
+    # Shared disk guard, once per run. This is the one that EMAILS - it also
+    # lets budgets grow into unallocated space first, so a pipeline that is
+    # legitimately growing is not blocked by a number guessed months ago.
+    # SyncService keeps its own per-service check for mid-run protection; that
+    # one only logs, because a long backfill must not mail on every service.
+    try:
+        guard("bc_sync")
+    except DiskGuardStop as exc:
+        logger.error(f"Disk guard stopped this run: {exc}")
+        return 4
+    except Exception:
+        # Never let the guard itself take down a run that could have succeeded.
+        logger.exception("Disk guard could not run - continuing without it.")
 
     sync_service = SyncService(bc_config, db_config)
 

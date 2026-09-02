@@ -74,6 +74,13 @@ jobs:
             ${{ vars.SUPABASE_RAW_JSON_EXCLUDE_TABLES || '*' }}
           SUPABASE_DISK_LIMIT_GB: ${{ vars.SUPABASE_DISK_LIMIT_GB || '50' }}
           SUPABASE_DISK_STOP_PCT: ${{ vars.SUPABASE_DISK_STOP_PCT || '85' }}
+          # Disk alerts. Without these the guard still works, it just logs
+          # instead of emailing. Gmail app passwords are disabled on this
+          # Workspace, so this is an OAuth client with the gmail.send scope.
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          GMAIL_SENDER: ${{ secrets.GMAIL_SENDER }}
         run: |
           python app.py --mode ${{ github.event.inputs.mode || 'incremental' }}
 
