@@ -6,7 +6,13 @@ birbal@thebakersdozen.in. It prints a refresh token. That token, plus the
 client id and secret, go into GitHub secrets and never need touching again
 unless someone revokes them.
 
-    python scripts/gmail_authorize.py "C:/path/to/client_secret_....json"
+    python scripts/gmail_authorize.py "C:/path/to/client_secret_....json" --set-secrets
+
+--set-secrets writes the GitHub secrets straight from memory, so the refresh
+token is never printed, never copied, and never lands in a terminal scrollback
+or a chat transcript. Add repo names to do several at once:
+
+    python scripts/gmail_authorize.py "...json" --set-secrets         keyur-tbd/bc-supabase-sync keyur-tbd/marketplace-ads-pipeline
 
 Why not an app password: Google Workspace has them disabled here. Why not a
 service account: that needs Workspace-admin domain-wide delegation. This uses
@@ -14,14 +20,14 @@ an OAuth client that already exists in the mail-grn project.
 
 The only scope requested is gmail.send - permission to send, not to read.
 
-At the end it prints three values and the exact `gh secret set` commands. The
-refresh token is a credential: do not paste it into chat, tickets or commits.
+The only scope requested is gmail.send - permission to send, not to read.
 """
 from __future__ import annotations
 
 import http.server
 import json
 import secrets
+import subprocess
 import sys
 import threading
 import urllib.parse
@@ -32,6 +38,7 @@ import requests
 SCOPE = "https://www.googleapis.com/auth/gmail.send"
 AUTH = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN = "https://oauth2.googleapis.com/token"
+SEP = "=" * 72
 PORT = 8080                      # must match a redirect_uri on the OAuth client
 
 
@@ -112,14 +119,49 @@ def main() -> int:
         print("https://myaccount.google.com/permissions and run this again.")
         return 6
 
-    print("\n" + "=" * 72)
-    print("Success. Store these as GitHub secrets - the refresh token is a credential,")
-    print("so do not paste it into chat, a ticket, or a commit.\n")
-    print(f'  gh secret set GMAIL_CLIENT_ID     --body "{client_id}"')
-    print( '  gh secret set GMAIL_CLIENT_SECRET --body "<the client_secret from that json>"')
-    print(f'  gh secret set GMAIL_REFRESH_TOKEN --body "{tok["refresh_token"]}"')
-    print("\nRepeat for each repo, or set them once at the org/user level.")
-    print("=" * 72)
+    refresh_token = tok["refresh_token"]
+    sender = "birbal@thebakersdozen.in"
+    values = {
+        "GMAIL_CLIENT_ID": client_id,
+        "GMAIL_CLIENT_SECRET": client_secret,
+        "GMAIL_REFRESH_TOKEN": refresh_token,
+        "GMAIL_SENDER": sender,
+    }
+
+    if "--set-secrets" in sys.argv:
+        repos = [a for a in sys.argv[2:] if not a.startswith("--")]
+        targets = repos or [None]          # None = whichever repo we are inside
+        print(SEP)
+        failed = False
+        for repo in targets:
+            label = repo or "(current repo)"
+            for name, value in values.items():
+                cmd = ["gh", "secret", "set", name, "--body", value]
+                if repo:
+                    cmd += ["--repo", repo]
+                # capture output so a value can never be echoed back on failure
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode != 0:
+                    failed = True
+                    print("  FAILED  {}  {}: {}".format(label, name, r.stderr.strip()[:120]))
+                else:
+                    print("  set     {}  {}".format(label, name))
+        print(SEP)
+        print("Written straight from memory - the refresh token was never printed.")
+        if failed:
+            print("Some secrets failed. Fix the errors above and re-run; re-running is safe.")
+            return 7
+        return 0
+
+    print(SEP)
+    print("Success. The refresh token is a credential: prefer --set-secrets, which")
+    print("writes it without ever showing it. Printing it only because you did not.")
+    print("")
+    print('  gh secret set GMAIL_CLIENT_ID     --body "{}"'.format(client_id))
+    print('  gh secret set GMAIL_CLIENT_SECRET --body "<the client_secret from that json>"')
+    print('  gh secret set GMAIL_REFRESH_TOKEN --body "{}"'.format(refresh_token))
+    print('  gh secret set GMAIL_SENDER        --body "{}"'.format(sender))
+    print(SEP)
     return 0
 
 

@@ -759,12 +759,20 @@ To mint a new refresh token (they can be revoked, and then alerts go quiet
 without anything else failing):
 
 ```bash
-python scripts/gmail_authorize.py "path/to/client_secret_*.json"
+python scripts/gmail_authorize.py "path/to/client_secret_*.json" --set-secrets
 ```
 
-It prints the exact `gh secret set` commands. Run it in a normal terminal - the
-refresh token is a credential and should not end up in a transcript or a
-commit.
+`--set-secrets` writes the four secrets to GitHub **straight from memory**, so
+the refresh token is never printed and cannot end up in a scrollback, a
+transcript or a commit. It takes repo names to do several at once:
+
+```bash
+python scripts/gmail_authorize.py "...json" --set-secrets     keyur-tbd/bc-supabase-sync keyur-tbd/marketplace-ads-pipeline
+```
+
+Revoking the token at https://myaccount.google.com/permissions is safe and
+reversible - re-run the command above and alerts resume. Nothing else breaks in
+the meantime: the guard still stops pipelines, it just stops emailing.
 
 ### Disk policy is shared across pipelines
 
