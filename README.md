@@ -668,6 +668,57 @@ predicate AND-ed into every request for a service. `Item_Ledger_Entry_Type eq
 'Sale'` keeps the purchase/output/consumption/adjustment entries out of the
 database entirely: 714k rows instead of 1.17M for FY 2026-27.
 
+### Disk policy is shared across pipelines
+
+This Supabase volume is shared by several pipelines the same person maintains:
+this sync, the GRN schedulers, and the marketplace/ads loaders. The old guard
+watched TOTAL database size, so it halted whichever pipeline ran next rather
+than the one filling the disk - on 2026-09-02 it would have stopped this sync
+at 25% of its own usage because another pipeline held 73%.
+
+`sql/05_etl_disk_policy.sql` puts the policy in the database (not in any repo's
+.env) and the decision in a function, so every pipeline behaves identically
+without duplicating logic. A pipeline stops when **it** is over its own budget,
+or when the volume as a whole is full.
+
+| pipeline | matches | budget | used 2026-09-02 |
+|---|---|---:|---:|
+| `_disk` | the volume itself | 50 GB, stop 85%, warn 70% | 25.4 GB |
+| `marketplace` | `instamart* zepto* blinkit* amz* fk_* meta_* gads_* mp_*` | 24 GB | 16.0 GB |
+| `bc_sync` | `bc_* ref_gst_state etl_*` | 12 GB | 5.9 GB |
+| `grn` | `nb_* hot_* bb_* milkbasket* reliance* mraws* doc_* hyperpure* flipkart*` | 4 GB | 1.0 GB |
+
+Budgets sum to 42.5 GB, exactly the global stop threshold, so the two checks
+agree rather than contradict. Tables matching nothing are governed by the
+volume check only - guarded, just not budgeted (24 such tables, 0.00 GB).
+
+**Adopting it in another pipeline** is one query. Everything else - patterns,
+budgets, thresholds - is data, so it changes in one place for all of them:
+
+```python
+row = conn.execute(text("SELECT action, reason FROM etl_disk_check(:p)"),
+                   {"p": "marketplace"}).fetchone()   # your pipeline's name
+if row.action == "stop":
+    raise SystemExit(f"disk guard: {row.reason}")
+if row.action == "warn":
+    logger.warning(f"disk guard: {row.reason}")
+```
+
+Adjusting a budget needs no deploy:
+
+```sql
+UPDATE etl_disk_policy SET budget_gb = 30 WHERE pipeline = 'marketplace';
+UPDATE etl_disk_policy SET budget_gb = 100 WHERE pipeline = '_disk';  -- after a resize
+```
+
+Reapplying `sql/05` never overwrites `budget_gb` - once set it is operational
+state, and the every-sync reapply must not silently undo a deliberate change.
+Patterns and thresholds ARE reasserted.
+
+This sync reads the policy and falls back to the old `SUPABASE_DISK_LIMIT_GB`
+env guard if the policy objects are missing, which matters on a fresh database
+because `apply_sql.py` runs AFTER the sync.
+
 ### Autovacuum on the large tables
 
 Postgres triggers autovacuum at 20% of a table, which on

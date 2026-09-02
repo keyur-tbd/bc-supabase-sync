@@ -52,7 +52,7 @@ from sqlalchemy import create_engine, event, text
 class DiskGuardError(RuntimeError):
     """Raised when the database is too close to the disk limit to write safely."""
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, ProgrammingError, SQLAlchemyError
 
 from config import SupabaseConfig
 from utils.schema_helper import (
@@ -131,10 +131,54 @@ class SupabaseService:
         with self._engine.connect() as conn:
             return int(conn.execute(text("SELECT pg_database_size(current_database())")).scalar())
 
+    DISK_POLICY_PIPELINE = "bc_sync"
+
     def check_disk_headroom(self) -> str | None:
-        """Returns a human-readable status line, or raises DiskGuardError
-        when the database has grown past disk_stop_pct% of disk_limit_gb.
-        Returns None when the guard is disabled (disk_limit_gb == 0)."""
+        """Returns a human-readable status line, or raises DiskGuardError when
+        this pipeline must stop writing. Returns None when disabled.
+
+        Prefers the shared policy in etl_disk_policy (see
+        sql/05_etl_disk_policy.sql): this volume is shared with the GRN and
+        marketplace pipelines, and the old rule - stop when TOTAL database size
+        passes a threshold - halted whichever pipeline happened to run next
+        rather than the one filling the disk. On 2026-09-02 that would have
+        stopped this sync at 25% of its own usage because another pipeline held
+        73%. Under the shared policy a pipeline stops when IT is over budget,
+        or when the volume as a whole is full.
+
+        Falls back to the env-var guard when the policy is absent - a fresh
+        database has not run sql/ yet, since apply_sql.py runs AFTER the sync.
+        """
+        status = self._check_disk_policy()
+        if status is not None:
+            return status
+        return self._check_disk_env()
+
+    def _check_disk_policy(self) -> str | None:
+        """Shared-policy guard. Returns None (not a status) when the policy
+        objects do not exist yet, so the caller can fall back."""
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT action, reason FROM public.etl_disk_check(:p)"),
+                    {"p": self.DISK_POLICY_PIPELINE},
+                ).fetchone()
+        except (ProgrammingError, OperationalError):
+            return None          # policy not installed - use the env-var guard
+        if row is None:
+            return None
+        action, reason = row[0], row[1]
+        if action == "stop":
+            raise DiskGuardError(
+                f"disk guard [{self.DISK_POLICY_PIPELINE}]: {reason} - refusing to write. "
+                f"Raise the budget in etl_disk_policy, free space, or grow the volume, then re-run."
+            )
+        if action == "warn":
+            logger.warning(f"disk guard [{self.DISK_POLICY_PIPELINE}]: {reason}")
+        return f"disk guard [{self.DISK_POLICY_PIPELINE}]: {reason}"
+
+    def _check_disk_env(self) -> str | None:
+        """Original guard: total database size against SUPABASE_DISK_LIMIT_GB."""
         limit_gb = self._config.disk_limit_gb
         if not limit_gb:
             return None
