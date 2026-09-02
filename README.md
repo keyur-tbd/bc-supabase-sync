@@ -509,6 +509,7 @@ no date floor.
     sql/01_ref_gst_state.sql                BC state code -> '27-MAHARASHTRA'
     sql/02_v_sales_register_gst_detail.sql  the view
     sql/03_sales_register_indexes.sql       indexes the view's joins need
+    sql/04_autovacuum_tuning.sql            per-table autovacuum thresholds
 
 `scripts/apply_sql.py` applies all three, in filename order, and runs as a step
 in `bc_sync.yml` after every sync - so the deployed view always equals what is
@@ -666,6 +667,30 @@ services with `--mode full`; budget roughly 0.9 GB per additional year.
 predicate AND-ed into every request for a service. `Item_Ledger_Entry_Type eq
 'Sale'` keeps the purchase/output/consumption/adjustment entries out of the
 database entirely: 714k rows instead of 1.17M for FY 2026-27.
+
+### Autovacuum on the large tables
+
+Postgres triggers autovacuum at 20% of a table, which on
+`bc_general_ledger_entries` is 1,260,804 dead tuples - so it had **never** run
+there, nor on `bc_item_ledger_entries` or `bc_value_entries`. Statistics
+drifted with it: on 2026-09-02 the planner believed the GL table held 10,261
+rows against an actual 6,303,769, a 500x error affecting any query against it.
+
+`sql/04_autovacuum_tuning.sql` sets 0.02 + 5,000 for vacuum and 0.01 + 2,500
+for analyze on the twelve large `bc_*` tables - strictly better than the
+default at every size. A flat threshold does NOT work: 50,000 was tried first
+and is worse than the default on the smaller tables here (bc_vendor_ledger_
+entries defaults to 7,181), so a percentage with a floor is the right shape.
+
+Statistics were also corrected once by hand with `VACUUM (ANALYZE)` across the
+`bc_*` tables - 51 seconds for all sixteen. Plain VACUUM takes no exclusive
+lock, so it runs happily alongside the sync; it does not shrink files, it makes
+the space reusable. For actual shrinking there is `scripts/reclaim_vacuum_full.py`,
+which needs an exclusive lock and room for a full table copy.
+
+Not tuned: `instamart_ads_performance` (10.5M rows), `zepto_campaign_performance`
+(6.7M) and the other non-BC tables sharing this database. They have the same
+problem and are larger, but they belong to other pipelines.
 
 ### Ship-to Address is read over SOAP, and that is the supported route
 
