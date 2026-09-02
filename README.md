@@ -484,7 +484,7 @@ Rules that came out of it:
     FULL`, `CLUSTER`) without room for a full copy of that table, and do it
     one table at a time, smallest first. Prefer forward fixes in the sync
     (the BIGINT → NUMERIC widening above) over rewriting history.
--   The disk guard (`SUPABASE_DISK_LIMIT_GB` (30 GB) / `SUPABASE_DISK_STOP_PCT` (85%)) is
+-   The disk guard (`SUPABASE_DISK_LIMIT_GB` (50 GB) / `SUPABASE_DISK_STOP_PCT` (85%)) is
     the backstop; keep it configured and update the limit when the disk
     changes.
 
