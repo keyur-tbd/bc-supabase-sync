@@ -42,6 +42,23 @@ _GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 BC_MAX_PAGE_SIZE = 20000
 
 
+# BC's own wording for "this was us, try again". Matched case-insensitively
+# against the response body of an otherwise non-retryable status.
+_TRANSIENT_MARKERS = (
+    "internal_servererror",
+    "please try again later",
+    "intermittent database connectivity",
+    "rebalanced your resources",
+    "service_unavailable",
+    "operation could not be completed",
+)
+
+
+def _looks_transient(body: str) -> bool:
+    low = (body or "").lower()
+    return any(m in low for m in _TRANSIENT_MARKERS)
+
+
 class BCApiService:
     def __init__(self, bc_config: BCConfig, auth_service: BCAuthService,
                  service_apis: dict[str, str] | None = None,
@@ -160,6 +177,20 @@ class BCApiService:
                 f"BC API throttled/unavailable (status {resp.status_code})",
                 status_code=resp.status_code,
                 retry_after=float(retry_after) if retry_after else None,
+            )
+
+        # BC sometimes wraps a transient fault in a 400. Status alone says
+        # "your request was wrong, do not retry"; the BODY says otherwise:
+        #   400 {"error":{"code":"Internal_ServerError","message":"... You
+        #   experienced intermittent database connectivity issues. This could
+        #   have happened because we rebalanced your resources ..."}}
+        # That killed a run mid-page on 2026-09-02 after 16 minutes of work.
+        # Classify on the body, not just the code, or the sync gives up on
+        # faults that would have succeeded on the next attempt.
+        if resp.status_code == 400 and _looks_transient(resp.text):
+            raise RetryableHTTPError(
+                f"BC API returned a transient fault as {resp.status_code}",
+                status_code=resp.status_code,
             )
 
         if resp.status_code != 200:
