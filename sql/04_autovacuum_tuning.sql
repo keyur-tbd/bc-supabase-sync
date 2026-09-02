@@ -26,14 +26,27 @@
 -- Metadata-only change: SHARE UPDATE EXCLUSIVE, no rewrite, does not block
 -- reads or writes. Safe to reapply on every sync, which is what happens.
 --
--- NOT touched: instamart_ads_performance (10.5M rows), zepto_campaign_
--- performance (6.7M), bb_shopper_level_search, blinkit_*, amz_*, fk_pla_*.
--- They are larger and have the same problem, but they belong to other
--- pipelines sharing this database - their owners should decide.
+-- Applies to the bc_* tables listed below AND, dynamically, to every table in
+-- the schema above 250,000 rows - including the ad/marketplace tables owned by
+-- other pipelines sharing this database (instamart_ads_performance at 10.5M
+-- rows needs 2,104,376 dead tuples to trigger by default). Added on the user's
+-- instruction 2026-09-02. Those tables ARE being autovacuumed, unlike the bc_*
+-- ones, because their backfills insert enough to cross the insert threshold -
+-- so for them this is about keeping statistics fresh during a long backfill
+-- rather than rescuing a table that has never been vacuumed.
+--
+-- LOCK SAFETY: ALTER TABLE ... SET (autovacuum_*) needs SHARE UPDATE EXCLUSIVE.
+-- That does not conflict with INSERT/UPDATE/SELECT, so it cannot block a
+-- backfill directly - but a lock WAIT would queue every later writer behind it.
+-- lock_timeout is therefore 3s and each table is attempted independently: a
+-- table that is busy is skipped with a notice, and the next run picks it up.
 
 DO $$
 DECLARE
     t text;
+    r record;
+    skipped int := 0;
+    applied int := 0;
     tables text[] := ARRAY[
         'bc_general_ledger_entries',
         'bc_item_ledger_entries',
@@ -49,16 +62,50 @@ DECLARE
         'bc_vendor_ledger_entries'
     ];
 BEGIN
+    SET LOCAL lock_timeout = '3s';
+
+    -- Named bc_* tables, so the smaller ones are covered too.
     FOREACH t IN ARRAY tables LOOP
         -- Skip anything not yet created: on a fresh database the sync builds
         -- these, and this file must not fail before it has.
-        IF to_regclass('public.' || t) IS NOT NULL THEN
+        CONTINUE WHEN to_regclass('public.' || t) IS NULL;
+        BEGIN
             EXECUTE format(
                 'ALTER TABLE public.%I SET ('
                 '  autovacuum_vacuum_scale_factor = 0.02,'
                 '  autovacuum_vacuum_threshold = 5000,'
                 '  autovacuum_analyze_scale_factor = 0.01,'
                 '  autovacuum_analyze_threshold = 2500)', t);
-        END IF;
+            applied := applied + 1;
+        EXCEPTION WHEN lock_not_available THEN
+            skipped := skipped + 1;
+            RAISE NOTICE 'busy, skipped (next run will retry): %', t;
+        END;
     END LOOP;
+
+    -- Everything else above 250k rows, whoever owns it. Catches tables that
+    -- grow past the line later without anyone editing this file.
+    FOR r IN
+        SELECT s.relname
+        FROM pg_stat_user_tables s
+        JOIN pg_class c ON c.oid = s.relid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND s.n_live_tup > 250000
+          AND NOT (s.relname = ANY(tables))
+    LOOP
+        BEGIN
+            EXECUTE format(
+                'ALTER TABLE public.%I SET ('
+                '  autovacuum_vacuum_scale_factor = 0.02,'
+                '  autovacuum_vacuum_threshold = 5000,'
+                '  autovacuum_analyze_scale_factor = 0.01,'
+                '  autovacuum_analyze_threshold = 2500)', r.relname);
+            applied := applied + 1;
+        EXCEPTION WHEN lock_not_available THEN
+            skipped := skipped + 1;
+            RAISE NOTICE 'busy, skipped (next run will retry): %', r.relname;
+        END;
+    END LOOP;
+
+    RAISE NOTICE 'autovacuum tuning: % table(s) applied, % skipped as busy', applied, skipped;
 END $$;

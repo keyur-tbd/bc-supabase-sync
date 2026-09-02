@@ -688,9 +688,22 @@ lock, so it runs happily alongside the sync; it does not shrink files, it makes
 the space reusable. For actual shrinking there is `scripts/reclaim_vacuum_full.py`,
 which needs an exclusive lock and room for a full table copy.
 
-Not tuned: `instamart_ads_performance` (10.5M rows), `zepto_campaign_performance`
-(6.7M) and the other non-BC tables sharing this database. They have the same
-problem and are larger, but they belong to other pipelines.
+It also covers, dynamically, **every** table in the schema above 250,000 rows -
+including the ad/marketplace tables owned by other pipelines sharing this
+database (`instamart_ads_performance` at 10.5M rows needed 2,104,376 dead
+tuples to trigger; now 215,433). Being dynamic, a table that grows past the
+line later is picked up without anyone editing the file.
+
+Those tables were already being autovacuumed, unlike the `bc_*` ones, because
+their backfills insert enough to cross the insert threshold - so for them this
+is about keeping statistics fresh during a long backfill rather than rescuing a
+table that has never been vacuumed.
+
+`ALTER TABLE ... SET (autovacuum_*)` needs SHARE UPDATE EXCLUSIVE, which does
+not conflict with INSERT/UPDATE/SELECT and so cannot block a backfill directly -
+but a lock WAIT would queue every later writer behind it. `lock_timeout` is
+therefore 3s and each table is attempted independently: a busy table is skipped
+with a notice and picked up on the next sync.
 
 ### Ship-to Address is read over SOAP, and that is the supported route
 
