@@ -667,24 +667,47 @@ predicate AND-ed into every request for a service. `Item_Ledger_Entry_Type eq
 'Sale'` keeps the purchase/output/consumption/adjustment entries out of the
 database entirely: 714k rows instead of 1.17M for FY 2026-27.
 
-### Ship-to Address is SOAP-only in this tenant
+### Ship-to Address is read over SOAP, and that is the supported route
 
-`Ship_to_Address_Excel` (page 300) is published, but for **SOAP only**: it is in
-the SOAP catalogue (78 services) and absent from the OData V4 catalogue (119
-entity sets), and its OData URL 404s. Every other service here is in both.
-`scripts/load_ship_to_address_soap.py` reads it over SOAP into
-`bc_ship_to_address` (2,335 rows, 2,159 with a GSTIN).
+`scripts/load_ship_to_address_soap.py` loads page 300 into `bc_ship_to_address`
+(~2,340 rows, ~2,160 with a GSTIN) over BC's SOAP endpoint. It runs on schedule
+as the "Load ship-to addresses (SOAP)" step in `bc_sync.yml`, after the main
+sync and with `if: always()`, so a SOAP outage cannot stop the core data from
+loading while its own failure is still reported. `read_page` retries on 5xx/429
+because that endpoint returns intermittent 500s.
 
-It **is** run on schedule: `bc_sync.yml` has a "Load ship-to addresses (SOAP)"
-step after the main sync, so ship-to registrations and names stay current
-without anyone remembering to run anything. It sits after the sync, with
-`if: always()`, so a SOAP outage cannot stop the core data from loading while
-its own failure is still reported.
+**This is not a workaround waiting to be removed.** BC does not serve page 300
+over OData V4 in this tenant, and toggling Published did not change that.
+Investigated 2026-09-01/02; the evidence, so nobody repeats it:
 
-That step exists only because of the SOAP-only publication. Once OData V4 is
-ticked on that Web Services row: delete the workflow step, delete the script,
-and set `Ship_to_Address_Excel` to enabled in `web_services.json` - it then
-syncs like everything else.
+| check | result |
+|---|---|
+| Web Services row | Object Type `Page`, Object ID `300`, Published, OData URL shown |
+| OData V4 catalogue | 119 entity sets, **no** ship/address entry |
+| OData V4 `$metadata` | 120 entity types, **no** ship-to entity type - every `Ship_to_Address` hit is a FIELD on other pages |
+| every URL form | `Resource not found for the segment 'Ship_to_Address_Excel'` |
+| same token, `Item_Card_Excel` | 200 - so it is not auth and not the URL shape |
+| SOAP `/WS/{company}/Page/Ship_to_Address_Excel` | serves the page fine |
+
+Note the Web Services page RENDERS an OData URL for any published row; it does
+not verify the endpoint is served, so a populated OData URL column is not
+evidence that it works.
+
+Nor is it permissions: the app reads the same table over SOAP, so it has access
+to table 222. (Contrast `Customer_Item_Reference_Excel`, which genuinely did
+need the `BAKERS DEVELOPMENT` permission set granted before it worked.)
+
+The remaining explanations are BC-internal and not diagnosable from outside -
+most likely how page 300 is defined in this customised tenant. If BC's
+behaviour ever changes, the disabled `Ship_to_Address_Excel` entry in
+`config/web_services.json` can be enabled and this script and its workflow step
+deleted; until then, SOAP is how this table is loaded and the script is
+production code, not a stopgap.
+
+Why it matters: the register's GSTN column is the customer's registration in
+the SHIP-TO state, which lives only on this table - BC records the bill-to
+GSTIN on the GST ledger. Wiring it in took GSTN from 2,096 mismatched cells
+across April-August to 79.
 
 ### One-off repair
 

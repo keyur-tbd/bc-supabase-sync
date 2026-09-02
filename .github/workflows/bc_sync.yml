@@ -77,18 +77,21 @@ jobs:
         run: |
           python app.py --mode ${{ github.event.inputs.mode || 'incremental' }}
 
-      # Ship-to Address is published for SOAP only in this tenant - it is absent
-      # from the OData V4 catalogue - so it cannot go through app.py's service
-      # loop and needs its own step. It feeds the Sales Register's GSTN and
-      # Ship to Name columns, which silently go stale without it.
+      # BC does not serve page 300 over OData V4 in this tenant (investigated
+      # 2026-09-01/02 - the entity set is absent from both the OData catalogue
+      # and $metadata even though the Web Services row is Page/300/Published;
+      # see the README). SOAP serves it fine, so it cannot go through app.py's
+      # OData service loop and needs its own step. It feeds the Sales
+      # Register's GSTN and Ship to Name columns, which go stale silently
+      # without it - the register keeps emitting plausible values either way.
       #
       # Runs AFTER the main sync on purpose: a SOAP outage must not stop the
       # core data from syncing. `if: always()` so it still runs when the sync
       # step fails, and its own failure is still reported.
       #
-      # When OData V4 is enabled on that Web Services row: delete this step,
-      # delete the script, and set Ship_to_Address_Excel enabled in
-      # config/web_services.json.
+      # This is the supported route for this table, not a stopgap. If BC ever
+      # exposes page 300 over OData, enable Ship_to_Address_Excel in
+      # config/web_services.json and delete this step and the script.
       - name: Load ship-to addresses (SOAP)
         if: always()
         env:

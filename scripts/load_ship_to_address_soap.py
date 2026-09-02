@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Load Ship-to Addresses into Supabase over BC's SOAP endpoint.
 
-WHY SOAP: `Ship_to_Address_Excel` (page 300) is published in this tenant for
-SOAP only - it appears in the SOAP catalogue (78 services) but NOT in the
-OData V4 catalogue (119 entity sets), and the OData URL 404s. Everything else
-this project syncs is published for both. The sync framework speaks OData, so
-this one table gets its own loader until the OData V4 box is ticked on that
-Web Services row; after that, delete this script and flip the existing
-`Ship_to_Address_Excel` entry in web_services.json to enabled.
+WHY SOAP: BC does not serve page 300 over OData V4 in this tenant. The Web
+Services row is Object Type Page, ID 300, Published, and BC even renders an
+OData URL for it - but the entity set is absent from both the OData catalogue
+(119 sets) and $metadata (120 entity types), and every URL form returns
+"Resource not found for the segment". The same token returns 200 for
+Item_Card_Excel, and SOAP serves this page fine, so it is neither auth nor
+permissions. Toggling Published did not change it. See the README for the full
+evidence.
+
+This is therefore the supported way to load this table, not a stopgap. If BC's
+behaviour ever changes, enable the existing `Ship_to_Address_Excel` entry in
+web_services.json and delete this script and its workflow step.
 
 WHAT IT UNBLOCKS: the register's GSTN column is the customer's registration in
 the SHIP-TO state, which lives here and nowhere else the API exposes - BC

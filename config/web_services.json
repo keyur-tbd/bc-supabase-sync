@@ -193,7 +193,7 @@
       "max_page_size": 10000
     },
     {
-      "_NOTE": "DISABLED 2026-08-28: BC returns 404 - no web service with this name is published in the Production environment. Re-enable after publishing page 300 as Ship_to_Address_Excel (or fix the name here). Ship-to Address (page 300). Standard key is Customer_No + Code; confirm the exact field names if rows quarantine.",
+      "_NOTE": "DISABLED - BC does not serve page 300 over OData V4 in this tenant. The earlier note here said \"no web service with this name is published\", which was WRONG: the Web Services row is Object Type Page, Object ID 300, Published, and SOAP serves it fine. The entity set is simply absent from the OData catalogue and $metadata (investigated 2026-09-01/02; toggling Published did not change it). The table is loaded by scripts/load_ship_to_address_soap.py, which runs as a step in bc_sync.yml - that is the supported route, not a stopgap. Enable this entry and delete the script only if BC ever starts serving page 300 over OData.",
       "name": "Ship_to_Address_Excel",
       "display_name": "Ship-to Address",
       "object_type": "Page",
