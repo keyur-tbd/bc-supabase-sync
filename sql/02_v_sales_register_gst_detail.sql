@@ -72,7 +72,15 @@
 -- from the item ledger). Nothing depends on this view, so dropping is safe.
 DROP VIEW IF EXISTS public.v_sales_register_gst_detail;
 
-CREATE VIEW public.v_sales_register_gst_detail AS
+-- security_invoker = on: without it the view runs with the privileges of its
+-- owner (postgres, which has BYPASSRLS), so anon - a role every browser holds
+-- the key for - could read the whole sales register through the view even
+-- though row level security is enabled on every bc_* table it selects from.
+-- With it, the view is evaluated as the querying role and RLS applies. The
+-- consumers (Power BI and the sync itself) connect as postgres, which
+-- bypasses RLS regardless, so nothing they see changes.
+CREATE VIEW public.v_sales_register_gst_detail
+    WITH (security_invoker = on) AS
 
 -- One row per document line per GST component, then per document line.
 -- Reversed entries are excluded: BC flips that flag when an entry is cancelled,
@@ -574,3 +582,8 @@ LEFT JOIN cust_gstin cg ON cg.customer_no = d.customer_no
                        AND cg.state_no    = sh.gst_state_no
 LEFT JOIN public.ref_gst_state    bl ON bl.state_code = d.bill_to_state
 LEFT JOIN public.ref_gst_state    lo ON lo.state_code = d.location_state;
+
+-- DROP + CREATE above discards the view's grants, and Supabase's default
+-- privileges hand anon and authenticated everything on a fresh object. Take
+-- that back on every apply: nothing reaches this view over PostgREST.
+REVOKE ALL ON public.v_sales_register_gst_detail FROM anon, authenticated;
