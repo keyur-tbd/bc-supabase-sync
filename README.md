@@ -704,8 +704,19 @@ because it kept collecting data.
              ├─ email (once per cooldown, immediately if it got worse)
              └─ raise DiskGuardStop    if 'stop'
 
-`etl_alerts.py` is **identical in every pipeline repo**. Do not add per-repo
-logic to it. Everything configurable is in the database:
+`etl_alerts.py` is **identical in all 16 pipeline repos**. Do not add per-repo
+logic to it. It reaches the policy by whichever route that repo can actually
+use, which is not the same everywhere:
+
+| repos | transport | why |
+|---|---|---|
+| this one | psycopg | already a dependency |
+| `marketplace-ads-pipeline` | pg8000 | psycopg's bundled libpq rejects Supabase's private-CA pooler certificate, and the only psycopg mode that connected would negotiate plaintext first |
+| the 13 GRN schedulers | **PostgREST RPC** | they use supabase-py and have NO Postgres driver and no DSN. Supabase exposes functions at `/rest/v1/rpc/<name>`, so they reach the same policy with the `SUPABASE_URL` + service-role key they already hold - no new secrets, no new dependency |
+
+Same policy, same functions, same answers either way.
+
+Everything configurable is in the database:
 
 | table | holds |
 |---|---|

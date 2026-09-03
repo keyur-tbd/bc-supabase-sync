@@ -56,21 +56,109 @@ class DiskGuardStop(RuntimeError):
     """This pipeline must not write right now. Raised by guard()."""
 
 
+# -------------------------------------------------------------- transport --
+#
+# Two ways to reach the policy, because the repos differ:
+#
+#   direct Postgres  bc-supabase-sync (psycopg), marketplace-ads-pipeline
+#                    (pg8000 - psycopg's libpq rejects Supabase's private-CA
+#                    pooler certificate)
+#   PostgREST RPC    the 13 GRN schedulers, which use supabase-py and have NO
+#                    Postgres driver and no DSN at all. Supabase exposes
+#                    functions at /rest/v1/rpc/<name>, so they reach the same
+#                    policy with the SUPABASE_URL + service-role key they
+#                    already hold. No new secrets, no new dependency.
+#
+# Same policy, same functions, same answers either way.
+
+
+def _rest_base() -> str | None:
+    """PostgREST base URL, or None if this repo has no REST credentials."""
+    url = os.environ.get("SUPABASE_URL")
+    key = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+           or os.environ.get("SUPABASE_KEY"))
+    if not (url and key):
+        return None
+    url = url.rstrip("/")
+    # Some repos store ".../rest/v1/", others just the project root.
+    return url if url.endswith("/rest/v1") else url + "/rest/v1"
+
+
+def _rpc(fn: str, payload: dict):
+    """Call a Postgres function through PostgREST. Returns the decoded body."""
+    base = _rest_base()
+    key = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+           or os.environ.get("SUPABASE_KEY"))
+    r = requests.post(f"{base}/rpc/{fn}", timeout=30,
+                      headers={"apikey": key, "Authorization": "Bearer " + key,
+                               "Content-Type": "application/json"},
+                      json=payload)
+    if r.status_code >= 300:
+        raise RuntimeError(f"RPC {fn} failed ({r.status_code}): {r.text[:200]}")
+    # A function returning void (etl_record_alert) gives an empty body, and
+    # r.json() would raise on that.
+    if not r.text.strip():
+        return None
+    return r.json()
+
+
 # --------------------------------------------------------------- database --
 
 def _connect(dsn: str | None = None):
-    """psycopg3 if present, psycopg2 otherwise - the repos are not consistent."""
+    """Connect with whatever driver this repo actually has.
+
+    The repos are not consistent, and one of them cannot use psycopg at all:
+    marketplace-ads-pipeline uses pg8000 because psycopg-binary's bundled libpq
+    verifies Supabase's private-CA pooler certificate and fails, and the only
+    psycopg mode that connected (sslmode=allow) would negotiate plaintext
+    first. So try psycopg, then psycopg2, then pg8000 with an SSL context -
+    encrypted, unverified, the same posture that repo already uses.
+
+    Credentials: SUPABASE_DB_URL if set, else the PG* variables (which is what
+    the marketplace pipeline supplies).
+    """
     dsn = dsn or os.environ.get("SUPABASE_DB_URL")
-    if not dsn:
-        raise RuntimeError("SUPABASE_DB_URL is not set, so the disk guard cannot run.")
-    try:
-        import psycopg                      # psycopg 3
-        return psycopg.connect(dsn, autocommit=True)
-    except ImportError:
-        import psycopg2                     # psycopg 2
-        conn = psycopg2.connect(dsn)
-        conn.autocommit = True
-        return conn
+    if dsn:
+        try:
+            import psycopg                  # psycopg 3
+            return psycopg.connect(dsn, autocommit=True)
+        except ImportError:
+            pass
+        try:
+            import psycopg2                 # psycopg 2
+            conn = psycopg2.connect(dsn)
+            conn.autocommit = True
+            return conn
+        except ImportError:
+            pass
+
+    host = os.environ.get("PGHOST")
+    if not (dsn or host):
+        raise RuntimeError(
+            "No database credentials for the disk guard: set SUPABASE_DB_URL, "
+            "or PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD.")
+
+    import ssl
+    import pg8000.dbapi
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False              # Supabase pooler uses a private CA
+    ctx.verify_mode = ssl.CERT_NONE
+    if dsn and not host:                    # pull the parts out of the DSN
+        from urllib.parse import unquote, urlparse
+        u = urlparse(dsn)
+        host, port = u.hostname, u.port or 5432
+        user, password = unquote(u.username or ""), unquote(u.password or "")
+        database = (u.path or "/postgres").lstrip("/") or "postgres"
+    else:
+        port = int(os.environ.get("PGPORT", "5432"))
+        user = os.environ.get("PGUSER")
+        password = os.environ.get("PGPASSWORD")
+        database = os.environ.get("PGDATABASE", "postgres")
+    conn = pg8000.dbapi.connect(user=user, password=password, host=host,
+                                port=port, database=database, ssl_context=ctx,
+                                timeout=30)
+    conn.autocommit = True
+    return conn
 
 
 # ------------------------------------------------------------------ email --
@@ -133,62 +221,42 @@ def guard(pipeline: str, dsn: str | None = None, *, raise_on_stop: bool = True) 
     Lets budgets grow into UNALLOCATED volume space first, so a pipeline that
     is legitimately growing is not blocked by a number somebody guessed months
     ago. It can never grow past the volume's stop threshold.
+
+    FAILS OPEN. If the guard itself cannot run - no credentials in this step,
+    database unreachable, policy tables not installed - it logs loudly and
+    returns 'ok' rather than raising. A guard that breaks a working pipeline is
+    worse than one that occasionally cannot check, and if the database is
+    unreachable the pipeline's own writes are failing anyway. DiskGuardStop is
+    the one exception: that is a real answer and it propagates.
     """
-    conn = _connect(dsn)
     try:
-        cur = conn.cursor()
+        return _guard(pipeline, dsn, raise_on_stop=raise_on_stop)
+    except DiskGuardStop:
+        raise
+    except Exception:
+        logger.exception(
+            "Disk guard could not run for %s - continuing WITHOUT it. Fix this: "
+            "the pipeline is now unguarded.", pipeline)
+        return "ok"
 
-        grown = []
-        try:
-            cur.execute("SELECT pipeline_name, old_budget_gb, new_budget_gb, reason "
-                        "FROM public.etl_disk_autobudget()")
-            grown = cur.fetchall()
-        except Exception:
-            logger.debug("etl_disk_autobudget() unavailable - skipping auto-budget")
 
-        cur.execute("SELECT action, reason FROM public.etl_disk_check(%s)", (pipeline,))
-        row = cur.fetchone()
-        if not row:
-            return "ok"
-        action, reason = row[0], row[1]
+def _guard(pipeline: str, dsn: str | None = None, *, raise_on_stop: bool = True) -> str:
+    # PostgREST when this repo has no Postgres driver (the GRN schedulers);
+    # direct SQL otherwise. Identical policy either way.
+    if _rest_base() and not (dsn or os.environ.get("SUPABASE_DB_URL")
+                             or os.environ.get("PGHOST")):
+        action, reason, grown, orphans, should, recipients = _read_via_rest(pipeline)
+        record = lambda sent: _rpc("etl_record_alert", {                 # noqa: E731
+            "p_pipeline": pipeline, "p_level": action,
+            "p_reason": reason, "p_sent": sent})
+    else:
+        action, reason, grown, orphans, should, recipients, record = _read_via_sql(pipeline, dsn)
 
-        cur.execute("SELECT recipients FROM public.etl_alert_config WHERE id")
-        cfg = cur.fetchone()
-        recipients = list(cfg[0]) if cfg else []
-
-        cur.execute("SELECT public.etl_should_alert(%s, %s)", (pipeline, action))
-        should = bool(cur.fetchone()[0])
-
-        sent = False
-        if should:
-            cur.execute("SELECT table_name, gb FROM public.etl_unbudgeted_tables(0.5)")
-            orphans = cur.fetchall()
-            body = [reason, ""]
-            if grown:
-                body.append("Budgets grew automatically into free space:")
-                body += ["  - " + g[3] for g in grown] + [""]
-            if orphans:
-                body.append("Large tables no budget claims (guarded by the volume ceiling only):")
-                body += ["  - {}: {} GB".format(t[0], t[1]) for t in orphans]
-                body.append("  Add a pattern in etl_disk_policy so these count against someone.")
-                body.append("")
-            body += [
-                "What to do:",
-                "  - raise a budget:  UPDATE etl_disk_policy SET budget_gb = <n> WHERE pipeline = '<name>';",
-                "  - after a resize:  UPDATE etl_disk_policy SET budget_gb = <new size> WHERE pipeline = '_disk';",
-                "  - change who gets this: UPDATE etl_alert_config SET recipients = ARRAY['a@b.com'];",
-                "",
-                "(pipeline: {}. At most one of these per pipeline per cooldown, but a "
-                "change for the worse is sent immediately.)".format(pipeline),
-            ]
-            sent = send_mail(
-                "[{}] Supabase disk - {}".format(action.upper(), pipeline),
-                "\n".join(body), recipients)
-
-        cur.execute("SELECT public.etl_record_alert(%s, %s, %s, %s)",
-                    (pipeline, action, reason, sent))
-    finally:
-        conn.close()
+    sent = False
+    if should:
+        sent = send_mail("[{}] Supabase disk - {}".format(action.upper(), pipeline),
+                         _compose(pipeline, reason, grown, orphans), recipients)
+    record(sent)
 
     if action == "stop":
         logger.error("disk guard [%s]: %s", pipeline, reason)
@@ -199,6 +267,88 @@ def guard(pipeline: str, dsn: str | None = None, *, raise_on_stop: bool = True) 
     else:
         logger.info("disk guard [%s]: %s", pipeline, reason)
     return action
+
+
+def _read_via_rest(pipeline: str):
+    try:
+        grown = [(g["pipeline_name"], g["old_budget_gb"], g["new_budget_gb"], g["reason"])
+                 for g in (_rpc("etl_disk_autobudget", {}) or [])]
+    except Exception:
+        grown = []
+        logger.debug("etl_disk_autobudget unavailable over RPC")
+    chk = _rpc("etl_disk_check", {"p_pipeline": pipeline})
+    row = chk[0] if isinstance(chk, list) and chk else chk
+    action, reason = row["action"], row["reason"]
+    should = bool(_rpc("etl_should_alert", {"p_pipeline": pipeline, "p_level": action}))
+    orphans = []
+    recipients = []
+    if should:
+        orphans = [(t["table_name"], t["gb"])
+                   for t in (_rpc("etl_unbudgeted_tables", {"p_min_gb": 0.5}) or [])]
+        base, key = _rest_base(), (os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+                                   or os.environ.get("SUPABASE_KEY"))
+        r = requests.get(f"{base}/etl_alert_config?select=recipients", timeout=30,
+                         headers={"apikey": key, "Authorization": "Bearer " + key})
+        if r.status_code < 300 and r.json():
+            recipients = list(r.json()[0]["recipients"])
+    return action, reason, grown, orphans, should, recipients
+
+
+def _read_via_sql(pipeline: str, dsn: str | None):
+    conn = _connect(dsn)
+    cur = conn.cursor()
+    grown = []
+    try:
+        cur.execute("SELECT pipeline_name, old_budget_gb, new_budget_gb, reason "
+                    "FROM public.etl_disk_autobudget()")
+        grown = cur.fetchall()
+    except Exception:
+        logger.debug("etl_disk_autobudget() unavailable - skipping auto-budget")
+
+    cur.execute("SELECT action, reason FROM public.etl_disk_check(%s)", (pipeline,))
+    row = cur.fetchone()
+    action, reason = (row[0], row[1]) if row else ("ok", "no policy row")
+
+    cur.execute("SELECT recipients FROM public.etl_alert_config WHERE id")
+    cfg = cur.fetchone()
+    recipients = list(cfg[0]) if cfg else []
+
+    cur.execute("SELECT public.etl_should_alert(%s, %s)", (pipeline, action))
+    should = bool(cur.fetchone()[0])
+
+    orphans = []
+    if should:
+        cur.execute("SELECT table_name, gb FROM public.etl_unbudgeted_tables(0.5)")
+        orphans = cur.fetchall()
+
+    def record(sent):
+        cur.execute("SELECT public.etl_record_alert(%s, %s, %s, %s)",
+                    (pipeline, action, reason, sent))
+        conn.close()
+
+    return action, reason, grown, orphans, should, recipients, record
+
+
+def _compose(pipeline: str, reason: str, grown, orphans) -> str:
+    body = [reason, ""]
+    if grown:
+        body.append("Budgets grew automatically into free space:")
+        body += ["  - " + g[3] for g in grown] + [""]
+    if orphans:
+        body.append("Large tables no budget claims (guarded by the volume ceiling only):")
+        body += ["  - {}: {} GB".format(t[0], t[1]) for t in orphans]
+        body.append("  Add a pattern in etl_disk_policy so these count against someone.")
+        body.append("")
+    body += [
+        "What to do:",
+        "  - raise a budget:  UPDATE etl_disk_policy SET budget_gb = <n> WHERE pipeline = '<name>';",
+        "  - after a resize:  UPDATE etl_disk_policy SET budget_gb = <new size> WHERE pipeline = '_disk';",
+        "  - change who gets this: UPDATE etl_alert_config SET recipients = ARRAY['a@b.com'];",
+        "",
+        "(pipeline: {}. At most one of these per pipeline per cooldown, but a "
+        "change for the worse is sent immediately.)".format(pipeline),
+    ]
+    return chr(10).join(body)
 
 
 if __name__ == "__main__":
