@@ -618,10 +618,26 @@ excluded deliberately.
 
 Fifteen repos write to the same `public` schema (the GRN/PRN schedulers, the
 marketplace ads pipeline, the Google and Meta ads syncs, the Uniware sync).
-They all write through PostgREST as hash-keyed **upserts** - no truncate, no
-delete-then-insert - so a reader never sees a half-empty table, and none of
-them issues DDL: their schema helpers print SQL for a human to run. That human
-step is exactly where the exposure rules above get forgotten.
+None of them can leave a table half-loaded: the GRN/PRN schedulers and the ads
+pipeline upsert on a `row_hash`, `google_ads` upserts on natural keys, and
+`meta_ads` - the only one that deletes - does its
+`delete account+date window; insert` inside one transaction, so a reader never
+sees the gap.
+
+DDL is where they differ, and it matters because a table or column that appears
+without a human present is one nobody remembers to expose:
+
+* **Print only** - the 13 GRN/PRN schedulers (`--print-schema`) and the
+  marketplace ads pipeline (`--print-schema`, applied with
+  `mp.dbadmin --apply-schema`). A person is always in the loop.
+* **Self-applying** - `google_ads` and `meta_ads` run `create table if not
+  exists` and `add column if not exists` on every run, so a new field from the
+  Google or Meta API lands in `public` unattended and stays invisible to Birbal
+  until the mirror is rebuilt. Run the column-drift check below after either
+  API changes.
+
+Neither kind drops or renames anything, so the dependent `warehouse` views are
+never at risk from them - only the exposure rules above get forgotten.
 
 Two consequences reach this repo:
 
