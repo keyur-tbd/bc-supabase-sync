@@ -512,21 +512,28 @@ housekeeping - they are the correctness contract.
     birbal_engine            LOGIN role behind the app's /api/ask. Holds no
                              table grants itself; inherits from the roles below.
       +- birbal_meta         SELECT on warehouse.warehouse_meta only.
-      +- birbal_scope_<hash> SELECT on 88 relations in schema warehouse.
+      +- birbal_scope_<hash> SELECT on every relation in schema warehouse.
            +- birbal_register_reader
-                             SELECT on the 13 public relations behind the sales
+                             SELECT on the public relations behind the sales
                              register, plus an RLS policy on each.
 
-    schema warehouse         87 "select * from public.<same name>" views + 2
-                             tables (warehouse_meta, return_reason_map).
-    schema archive           30 snapshot tables Birbal deliberately CANNOT reach
+    schema warehouse         one "select * from public.<same name>" view per
+                             exposed ETL table, a handful of hand-maintained
+                             derived views (channel_map, the register wrapper,
+                             the master views), and small config tables
+                             (warehouse_meta, return_reason_map, ...).
+    schema archive           snapshot tables Birbal deliberately CANNOT reach
                              (no USAGE). Live-only, decided 2026-09-04.
+
+Do not trust a count here: the exposed set grew from 87 relations to 93 in the
+three hours this section was being written, and `warehouse` gained two config
+tables in the same window. Run the checks at the end of this section instead.
 
 Birbal never queries the `public` schema by name. The `warehouse` views are the
 exposure contract: what is not mirrored there does not exist as far as the
-business is concerned. `warehouse.warehouse_meta` (89 rows of `doc_md`) is the
-dictionary it reads before writing SQL - a column not described there is a
-column it will not use correctly.
+business is concerned. `warehouse.warehouse_meta` holds one `doc_md` row per
+exposed relation - the dictionary Birbal reads before writing SQL - so a column
+nobody described there is a column it will not use correctly.
 
 The one exception is `public.v_sales_register_gst_detail`. It is SECURITY
 INVOKER, so the *querying* role is privilege-checked against every table the
