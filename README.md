@@ -498,6 +498,142 @@ the original table is untouched if a rewrite fails. On 2026-08-29 it took
 the database from 9.0 GB to 7.5 GB (credit-memo lines 419 → 98 MB; GL and
 item ledger were already lean because they never stored raw JSON).
 
+## Who reads this database (Birbal)
+
+This project is no longer the only thing on this Postgres. Since 2026-09-03 the
+same database backs **Birbal** (`birbal-tbdai/birbal-mission-control`), the
+ask-your-data app the business uses to answer questions in plain language, and
+it reads the live ETL tables. **A wrong or missing number here becomes a wrong
+answer there, with nobody in the loop to catch it**, so the rules below are not
+housekeeping - they are the correctness contract.
+
+### The read path, exactly
+
+    birbal_engine            LOGIN role behind the app's /api/ask. Holds no
+                             table grants itself; inherits from the roles below.
+      +- birbal_meta         SELECT on warehouse.warehouse_meta only.
+      +- birbal_scope_<hash> SELECT on 88 relations in schema warehouse.
+           +- birbal_register_reader
+                             SELECT on the 13 public relations behind the sales
+                             register, plus an RLS policy on each.
+
+    schema warehouse         87 "select * from public.<same name>" views + 2
+                             tables (warehouse_meta, return_reason_map).
+    schema archive           30 snapshot tables Birbal deliberately CANNOT reach
+                             (no USAGE). Live-only, decided 2026-09-04.
+
+Birbal never queries the `public` schema by name. The `warehouse` views are the
+exposure contract: what is not mirrored there does not exist as far as the
+business is concerned. `warehouse.warehouse_meta` (89 rows of `doc_md`) is the
+dictionary it reads before writing SQL - a column not described there is a
+column it will not use correctly.
+
+The one exception is `public.v_sales_register_gst_detail`. It is SECURITY
+INVOKER, so the *querying* role is privilege-checked against every table the
+view touches; `birbal_register_reader` exists to satisfy that check and holds
+SELECT on exactly the view's current dependencies, computed from `pg_depend` by
+`app.sync_register_reader_grants()` in the Birbal repo.
+
+### Three ways an ETL change silently breaks Birbal
+
+**1. A view depends on what you are dropping.** Every public table Birbal can
+see has a `warehouse` view on it, and `warehouse.v_sales_register_gst_detail`
+sits on top of the register view. A plain `DROP` now fails (that is how the
+2026-09-04 05:34 UTC run went red) and `DROP ... CASCADE` deletes the consumer
+without a word. Both places in this repo that drop a view -
+`sql/02_v_sales_register_gst_detail.sql` and the column widening in
+`services/supabase_service.py` - capture every dependent first (definition,
+owner, storage options, comment, grants) and rebuild them afterwards in the
+same transaction, refusing outright if a *materialized* view is in the way. Do
+the same in any new code, and never type `DROP ... CASCADE` at a prompt here.
+
+**2. Recreating a view hands it to `anon`.** Supabase ships `ALTER DEFAULT
+PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated`, so a
+view recreated in `public` is immediately granted to the two roles whose key
+ships in every browser - and it comes back without `security_invoker` unless
+the storage options are replayed too. That combination would put the whole
+sales register behind the publishable key. Both rebuild paths therefore restore
+the ACL *exactly*: revoke whatever the fresh object was handed, then replay
+what was captured. A rebuild that "works" but changes `relacl` is a bug.
+
+**3. A new table or column does not reach Birbal at all.** A view pins its
+column list at CREATE time, and the exposure list is an array embedded in
+`app.sync_warehouse_views()`. So a column added by schema drift, or a new table
+from any pipeline, is invisible to Birbal - no error anywhere, just an answer
+that quietly omits it. After adding either, someone must run, as `postgres`:
+
+    select app.sync_warehouse_views();   -- mirror new tables/columns
+    select app.sync_role_grants();       -- re-grant (the mirror drops grants)
+
+and add or update that table's `warehouse.warehouse_meta` row. The wrapper over
+the register (`select r.*, ...`) is NOT covered by that function: a column
+added to `sql/02_*.sql` needs migrations 009 + 011 of the Birbal repo re-run.
+The apply emits a `WARNING` naming the columns when it sees that drift, and
+re-runs `app.sync_register_reader_grants()` by itself when the register's
+dependency set has changed - but only then, because that function re-grants
+across all of `public` and locks every table in it.
+
+**Currently not exposed**, so Birbal cannot answer on them: `uw_sale_order`,
+`uw_sale_order_item` (the Uniware sale-order feed), `gads_campaigns`,
+`gads_asset_groups`, `gads_search_terms`. Bookkeeping tables (`etl_sync_state`,
+`ingest_*`, `workflow_logs`, `uw_sync_*`, `mp_loaded_files`, `_bk_*`) are
+excluded deliberately.
+
+### Checks worth running after any schema change
+
+    -- public tables with no warehouse view (invisible to Birbal)
+    select c.relname
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind = 'r'
+      and not exists (select 1 from pg_class w
+                      join pg_namespace wn on wn.oid = w.relnamespace
+                      where wn.nspname = 'warehouse' and w.relname = c.relname);
+
+    -- columns a warehouse view is missing (stale mirror)
+    select t.relname, a.attname
+    from pg_class t
+    join pg_namespace tn on tn.oid = t.relnamespace and tn.nspname = 'public'
+    join pg_attribute a on a.attrelid = t.oid and a.attnum > 0 and not a.attisdropped
+    join pg_class w on w.relname = t.relname
+    join pg_namespace wn on wn.oid = w.relnamespace and wn.nspname = 'warehouse'
+    where not exists (select 1 from pg_attribute wa
+                      where wa.attrelid = w.oid and wa.attname = a.attname
+                        and wa.attnum > 0 and not wa.attisdropped);
+
+    -- register dependencies the reader role cannot read (Birbal answers 500)
+    select d.refobjid::regclass::text
+    from pg_rewrite r
+    join pg_depend d on d.objid = r.oid and d.refclassid = 'pg_class'::regclass
+    where r.ev_class = 'public.v_sales_register_gst_detail'::regclass
+      and d.refobjid <> 'public.v_sales_register_gst_detail'::regclass
+      and not has_table_privilege('birbal_register_reader', d.refobjid, 'select');
+
+    -- views that came back readable by anon (should return nothing)
+    select c.oid::regclass::text, c.relacl::text
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind = 'v'
+      and c.relacl::text like '%anon=%';
+
+### The other pipelines on this database
+
+Fifteen repos write to the same `public` schema (the GRN/PRN schedulers, the
+marketplace ads pipeline, the Google and Meta ads syncs, the Uniware sync).
+They all write through PostgREST as hash-keyed **upserts** - no truncate, no
+delete-then-insert - so a reader never sees a half-empty table, and none of
+them issues DDL: their schema helpers print SQL for a human to run. That human
+step is exactly where the exposure rules above get forgotten.
+
+Two consequences reach this repo:
+
+* **The disk is shared.** 31 GB of the 50 GB budget is in use, and the two
+  largest tables (`instamart_ads_performance` 8.5 GB,
+  `zepto_campaign_performance` 5.5 GB) belong to the ads pipeline, not to this
+  sync. The guard in `config.py` only governs what *this* pipeline writes; see
+  "Storage and the disk guard".
+* **Locks are shared.** `apply_sql.py` runs as one transaction and takes an
+  exclusive lock on the register view and its dependents for its duration. Keep
+  it short; never add work to those files that waits on anything external.
+
 ## Sales Register GST Detail
 
 BC partner report 74365 cannot be fetched as a report, so it is rebuilt as a
@@ -537,7 +673,7 @@ the CREATE. Grants made by hand on the view itself (`birbal_register_reader`)
 are captured and replayed the same way; before this they were silently revoked
 on every apply.
 
-Two things to know if you change the view's columns:
+Four things to know if you change the view's columns:
 
 * Dropping or renaming a column a dependent selects makes the rebuild fail.
   The file is one transaction, so nothing is committed - the SQL step goes red
@@ -546,6 +682,20 @@ Two things to know if you change the view's columns:
 * A **materialized** view depending on this one is refused outright, because
   rebuilding it from its definition would leave it empty until someone
   refreshed it. Drop it before the apply, or point it at a copy.
+* ADDING a column does not reach Birbal on its own. Its wrapper is
+  `select r.*, ...`, expanded and frozen when that view was created, so it
+  keeps serving the old column list until migrations 009 + 011 of
+  `birbal-tbdai/birbal-mission-control` are re-run. The apply logs a `WARNING`
+  listing the columns it can see are missing there.
+* Adding a SOURCE table to the view breaks Birbal until
+  `birbal_register_reader` can read it - the view is SECURITY INVOKER, so the
+  querying role is checked against every table it touches. The apply detects
+  that and re-runs `app.sync_register_reader_grants()` itself, but only when
+  the dependency set has actually drifted: that function re-grants across all
+  of `public` and locks every table in it.
+
+See "Who reads this database (Birbal)" above for the full read path and the
+checks to run after a schema change.
 
 ### Validation against the BC register exports, April-August 2026
 

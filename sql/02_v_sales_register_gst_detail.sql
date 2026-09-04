@@ -709,6 +709,7 @@ REVOKE ALL ON public.v_sales_register_gst_detail FROM anon, authenticated;
 DO $srgd_restore$
 DECLARE
     r       record;
+    fresh   record;
     stmt    text;
     n       int := 0;
 BEGIN
@@ -721,6 +722,18 @@ BEGIN
         IF r.comment IS NOT NULL THEN
             EXECUTE format('COMMENT ON VIEW %s IS %L', r.ident, r.comment);
         END IF;
+        -- Restore the ACL exactly, which means revoking first: Supabase's
+        -- default privileges hand anon and authenticated everything on a view
+        -- created in public, and a dependent that was deliberately kept off
+        -- PostgREST must not come back readable by them.
+        FOR fresh IN
+            SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC'
+                                 ELSE quote_ident(pg_get_userbyid(a.grantee)) END AS grantee
+            FROM pg_class c, aclexplode(c.relacl) a
+            WHERE c.oid = r.ident::regclass AND a.grantee <> c.relowner
+        LOOP
+            EXECUTE format('REVOKE ALL ON %s FROM %s', r.ident, fresh.grantee);
+        END LOOP;
         FOREACH stmt IN ARRAY COALESCE(r.grants, ARRAY[]::text[]) LOOP
             EXECUTE stmt;
         END LOOP;
@@ -731,3 +744,82 @@ BEGIN
     END IF;
 END
 $srgd_restore$;
+
+-- ---------------------------------------------------------------------------
+-- Birbal's read path. public.v_sales_register_gst_detail is SECURITY INVOKER,
+-- so the querying role - not the owner - is privilege-checked against every
+-- table the view touches. Birbal reaches it through birbal_register_reader, a
+-- NOLOGIN role that app.sync_register_reader_grants() (in the Birbal repo,
+-- migration 010) grants SELECT on exactly this view's current dependencies,
+-- with a matching RLS policy on each. Add a source table to the view here and
+-- Birbal starts answering "permission denied for table ..." until that
+-- function is re-run.
+--
+-- So re-run it - but only when the dependency set has actually drifted. The
+-- function revokes and re-grants across all of public, which takes an
+-- exclusive lock on every table in it; doing that on each 2-hourly apply would
+-- stall the other pipelines and Birbal itself for no reason.
+DO $srgd_reader$
+DECLARE
+    stale text;
+BEGIN
+    IF to_regprocedure('app.sync_register_reader_grants()') IS NULL
+       OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'birbal_register_reader')
+    THEN
+        RETURN;  -- Birbal is not installed on this database.
+    END IF;
+
+    SELECT string_agg(DISTINCT dep::regclass::text, ', ') INTO stale
+    FROM (
+        SELECT d.refobjid AS dep
+        FROM pg_rewrite r
+        JOIN pg_depend d ON d.objid = r.oid
+                        AND d.refclassid = 'pg_class'::regclass
+        WHERE r.ev_class = 'public.v_sales_register_gst_detail'::regclass
+          AND d.refobjid <> 'public.v_sales_register_gst_detail'::regclass
+    ) deps
+    WHERE NOT has_table_privilege('birbal_register_reader', dep, 'SELECT')
+       -- A grant is not enough: these tables run RLS, so each one also needs
+       -- the reader's own SELECT policy or the view returns zero rows.
+       OR EXISTS (SELECT 1 FROM pg_class c
+                   WHERE c.oid = dep AND c.relkind IN ('r','p') AND c.relrowsecurity
+                     AND NOT EXISTS (SELECT 1 FROM pg_policy p
+                                      WHERE p.polrelid = dep
+                                        AND p.polname = 'birbal_register_read'));
+
+    IF stale IS NOT NULL THEN
+        RAISE NOTICE 'register view dependencies not readable by birbal_register_reader (%), re-running app.sync_register_reader_grants()', stale;
+        PERFORM app.sync_register_reader_grants();
+    END IF;
+END
+$srgd_reader$;
+
+-- Birbal does not read this view directly: warehouse.v_sales_register_gst_detail
+-- wraps it as "select r.*, <credit-memo date>, <normalized reason>", and a view
+-- pins its column list at CREATE time. Adding a column here therefore does NOT
+-- reach Birbal - the wrapper keeps serving the old list, with no error anywhere
+-- - until somebody re-runs migrations 009 + 011 in birbal-mission-control and
+-- updates the warehouse_meta dictionary row. Say so in the apply log rather
+-- than let it pass silently; this is a warning, not a failure, because a
+-- consumer being behind must not stop the ETL.
+DO $srgd_drift$
+DECLARE
+    missing text;
+BEGIN
+    IF to_regclass('warehouse.v_sales_register_gst_detail') IS NULL THEN
+        RETURN;
+    END IF;
+    SELECT string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) INTO missing
+    FROM pg_attribute a
+    WHERE a.attrelid = 'public.v_sales_register_gst_detail'::regclass
+      AND a.attnum > 0 AND NOT a.attisdropped
+      AND NOT EXISTS (
+          SELECT 1 FROM pg_attribute w
+          WHERE w.attrelid = 'warehouse.v_sales_register_gst_detail'::regclass
+            AND w.attnum > 0 AND NOT w.attisdropped
+            AND w.attname = a.attname);
+    IF missing IS NOT NULL THEN
+        RAISE WARNING 'warehouse.v_sales_register_gst_detail is missing column(s) % - Birbal cannot see them until birbal-mission-control migrations 009 + 011 are re-run', missing;
+    END IF;
+END
+$srgd_drift$;

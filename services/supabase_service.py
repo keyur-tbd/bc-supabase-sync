@@ -419,11 +419,21 @@ class SupabaseService:
                 # widen, put them back; all inside this one transaction, so a
                 # failure anywhere leaves both the type and the views untouched.
                 views = self._dependent_views(conn, table_name)
+                matviews = [v["name"] for v in views if v["relkind"] != "v"]
+                if matviews:
+                    # Recreating a matview from its definition leaves it empty
+                    # until somebody refreshes it, and whoever reads it would
+                    # see zeroes rather than an error. Refuse instead.
+                    raise RuntimeError(
+                        f"cannot widen {table_name}: materialized view(s) "
+                        f"{', '.join(matviews)} depend on it. Drop or detach "
+                        f"them, then re-run the sync."
+                    )
                 if views:
                     logger.info(f"Dropping {len(views)} dependent view(s) to widen "
-                                f"{table_name}: {', '.join(v for v, _ in views)}")
-                    for name, _definition in views:
-                        conn.execute(text(f"DROP VIEW IF EXISTS {name} CASCADE"))
+                                f"{table_name}: {', '.join(v['name'] for v in views)}")
+                    for v in views:
+                        conn.execute(text(f"DROP VIEW IF EXISTS {v['name']} CASCADE"))
                 for col, target in promotions:
                     conn.execute(
                         text(
@@ -433,19 +443,25 @@ class SupabaseService:
                     )
                 # Recreate innermost-first: _dependent_views returns them
                 # outermost-first so dropping cascades cleanly.
-                for name, definition in reversed(views):
-                    conn.execute(text(f"CREATE VIEW {name} AS {definition}"))
+                for v in reversed(views):
+                    self._recreate_view(conn, v)
                 if views:
                     logger.info(f"Recreated {len(views)} view(s) on {table_name}.")
             self._json_columns.pop(table_name, None)
 
-    def _dependent_views(self, conn, table_name: str) -> list[tuple[str, str]]:
-        """Views that depend on `table_name`, outermost first, as
-        [(qualified_name, definition)].
+    def _dependent_views(self, conn, table_name: str) -> list[dict]:
+        """Everything needed to put a dependent view back, outermost first.
 
         Walks pg_depend -> pg_rewrite transitively so a view built on a view is
         included too. The definitions come from pg_get_viewdef, which is what
         Postgres itself would emit, so recreating is faithful.
+
+        Definition alone is NOT enough. DROP + CREATE gives the new view fresh
+        default privileges, so a view somebody granted to a reporting role -
+        every warehouse.* view Birbal reads is one - would come back readable
+        by nobody, and a security_invoker view would come back running as its
+        owner. Carry owner, storage options, comment and grants across too.
+        Column-level grants are not carried (nothing here uses them).
         """
         sql = text("""
             WITH RECURSIVE dependents AS (
@@ -463,17 +479,62 @@ class SupabaseService:
                 WHERE d.classid = CAST('pg_rewrite' AS regclass)
                   AND r.ev_class <> dp.oid
             )
-            SELECT c.oid::regclass::text AS name,
-                   pg_get_viewdef(c.oid, true) AS definition,
-                   MAX(dp.depth) AS depth
+            SELECT c.oid::regclass::text                       AS name,
+                   pg_get_viewdef(c.oid, true)                 AS definition,
+                   c.relkind::text                             AS relkind,
+                   pg_get_userbyid(c.relowner)                 AS owner,
+                   COALESCE(array_to_string(c.reloptions, ', '), '') AS reloptions,
+                   obj_description(c.oid, 'pg_class')          AS comment,
+                   (SELECT array_agg(format('GRANT %s ON %s TO %s%s',
+                                            a.privilege_type,
+                                            c.oid::regclass::text,
+                                            CASE WHEN a.grantee = 0 THEN 'PUBLIC'
+                                                 ELSE quote_ident(pg_get_userbyid(a.grantee)) END,
+                                            CASE WHEN a.is_grantable
+                                                 THEN ' WITH GRANT OPTION' ELSE '' END))
+                      FROM aclexplode(c.relacl) a
+                     WHERE a.grantee <> c.relowner)            AS grants,
+                   MAX(dp.depth)                               AS depth
             FROM dependents dp
             JOIN pg_class c ON c.oid = dp.oid
             WHERE c.relkind IN ('v', 'm')
-            GROUP BY 1, 2
+            GROUP BY c.oid, c.relkind, c.relowner, c.reloptions, c.relacl
             ORDER BY depth DESC
         """)
         qualified = f"{self._schema}.{table_name}"
-        return [(r[0], r[1]) for r in conn.execute(sql, {"tbl": qualified}).fetchall()]
+        return [dict(r._mapping) for r in conn.execute(sql, {"tbl": qualified}).fetchall()]
+
+    @staticmethod
+    def _recreate_view(conn, view: dict) -> None:
+        """Rebuild one view captured by _dependent_views, privileges and all.
+
+        The ACL is restored EXACTLY, which means revoking before granting.
+        Supabase ships `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON
+        TABLES TO anon, authenticated`, so a view recreated in public is handed
+        to the two roles every browser holds a key for. On a view that was
+        deliberately kept off PostgREST - the sales register - that would be a
+        silent grant of the whole thing until the next apply_sql.py run.
+        """
+        opts = f" WITH ({view['reloptions']})" if view["reloptions"] else ""
+        conn.execute(text(f"CREATE VIEW {view['name']}{opts} AS {view['definition']}"))
+        conn.execute(text(f"ALTER VIEW {view['name']} OWNER TO {quote_ident(view['owner'])}"))
+        if view["comment"] is not None:
+            conn.execute(
+                text(f"COMMENT ON VIEW {view['name']} IS :c"), {"c": view["comment"]}
+            )
+        fresh = conn.execute(
+            text(
+                "SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' "
+                "       ELSE quote_ident(pg_get_userbyid(a.grantee)) END "
+                "FROM pg_class c, aclexplode(c.relacl) a "
+                "WHERE c.oid = CAST(:n AS regclass) AND a.grantee <> c.relowner"
+            ),
+            {"n": view["name"]},
+        ).scalars().all()
+        for grantee in fresh:
+            conn.execute(text(f"REVOKE ALL ON {view['name']} FROM {grantee}"))
+        for stmt in view["grants"] or []:
+            conn.execute(text(stmt))
 
     def max_by_series(self, table_name: str, column: str, separator: str = "-") -> dict[str, str]:
         """{series_prefix: highest value seen} for `column`, where the prefix
