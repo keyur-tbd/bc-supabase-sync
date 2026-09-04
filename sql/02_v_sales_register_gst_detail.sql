@@ -69,8 +69,102 @@
 -- DROP + CREATE rather than CREATE OR REPLACE: replacing a view cannot change
 -- a column's data type, and these expressions do change type as the derivation
 -- is refined (MRP went bigint -> numeric when it stopped being read straight
--- from the item ledger). Nothing depends on this view, so dropping is safe.
-DROP VIEW IF EXISTS public.v_sales_register_gst_detail;
+-- from the item ledger).
+--
+-- Things outside this repo DO depend on this view - warehouse.v_sales_register_gst_detail
+-- wraps it for the returns dashboard - so a bare DROP fails with "cannot drop
+-- ... because other objects depend on it" and takes the whole sync run red
+-- (it did, 2026-09-04 05:34 UTC). DROP CASCADE on its own would be worse: it
+-- deletes somebody else's view without a word. So capture every dependent
+-- view first, DROP CASCADE, and rebuild them after the CREATE below.
+--
+-- This file is applied as ONE transaction, so a dependent that cannot be
+-- rebuilt - because this view no longer has a column it selects - rolls the
+-- whole thing back. The apply fails loudly instead of dropping a consumer.
+-- Capture and rebuild run in the same session, which is what makes it safe to
+-- replay pg_get_viewdef's unqualified names: they re-resolve under the same
+-- search_path they were printed for.
+--
+-- Column-level grants are NOT carried over (nothing here uses them); table
+-- privileges, owner and comment are.
+CREATE TEMP TABLE _srgd_dependents ON COMMIT DROP AS
+WITH RECURSIVE dep AS (
+    -- to_regclass, not a ::regclass cast: on a fresh database the view does
+    -- not exist yet and the cast would raise instead of finding nothing.
+    SELECT to_regclass('public.v_sales_register_gst_detail') AS oid, 0 AS depth
+    UNION ALL
+    SELECT dc.oid, dep.depth + 1
+    FROM dep
+    JOIN pg_depend   d  ON d.refobjid   = dep.oid
+                       AND d.refclassid = 'pg_class'::regclass
+                       AND d.classid    = 'pg_rewrite'::regclass
+    JOIN pg_rewrite  rw ON rw.oid = d.objid
+    JOIN pg_class    dc ON dc.oid = rw.ev_class
+                       AND dc.oid <> dep.oid
+)
+SELECT
+    format('%I.%I', n.nspname, c.relname)        AS ident,
+    -- A view reachable by two paths is recorded at its deepest, so rebuilding
+    -- in ascending depth always finds what it selects from already there.
+    max(dep.depth)                               AS depth,
+    c.relkind                                    AS relkind,
+    pg_get_viewdef(c.oid, true)                  AS definition,
+    pg_get_userbyid(c.relowner)                  AS owner,
+    array_to_string(c.reloptions, ', ')          AS reloptions,
+    obj_description(c.oid, 'pg_class')           AS comment,
+    (SELECT array_agg(format('GRANT %s ON %I.%I TO %s%s',
+                             a.privilege_type, n.nspname, c.relname,
+                             CASE WHEN a.grantee = 0 THEN 'PUBLIC'
+                                  ELSE quote_ident(pg_get_userbyid(a.grantee)) END,
+                             CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END))
+       FROM aclexplode(c.relacl) a
+      -- The owner's own privileges come back with the object; replaying them
+      -- would only re-grant what CREATE VIEW already implies.
+      WHERE a.grantee <> c.relowner)             AS grants
+FROM dep
+JOIN pg_class     c ON c.oid = dep.oid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE dep.depth > 0
+GROUP BY c.oid, n.nspname, c.relname, c.relkind, c.relowner, c.reloptions, c.relacl;
+
+-- A materialized view holds data, and rebuilding it from its definition would
+-- leave it empty until somebody refreshed it. Refuse rather than truncate.
+DO $srgd_guard$
+DECLARE
+    matviews text;
+BEGIN
+    SELECT string_agg(ident, ', ') INTO matviews
+      FROM _srgd_dependents WHERE relkind <> 'v';
+    IF matviews IS NOT NULL THEN
+        RAISE EXCEPTION
+            'materialized view(s) depend on public.v_sales_register_gst_detail: %',
+            matviews
+        USING HINT = 'Drop or detach them first - this script will not rebuild '
+                     'a matview, and recreating one empty would silently break '
+                     'whatever reads it.';
+    END IF;
+END
+$srgd_guard$;
+
+-- The DROP throws away the grants on THIS view too. Supabase's default
+-- privileges re-grant postgres and service_role on the new object, so that
+-- much heals itself, but a role granted read by hand - birbal_register_reader,
+-- the reporting login - just quietly lost it on every apply until this was
+-- added. Capture those and replay them after the CREATE.
+CREATE TEMP TABLE _srgd_self ON COMMIT DROP AS
+SELECT
+    obj_description(c.oid, 'pg_class') AS comment,
+    (SELECT array_agg(format('GRANT %s ON public.v_sales_register_gst_detail TO %s%s',
+                             a.privilege_type,
+                             CASE WHEN a.grantee = 0 THEN 'PUBLIC'
+                                  ELSE quote_ident(pg_get_userbyid(a.grantee)) END,
+                             CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END))
+       FROM aclexplode(c.relacl) a
+      WHERE a.grantee <> c.relowner)  AS grants
+FROM pg_class c
+WHERE c.oid = to_regclass('public.v_sales_register_gst_detail');
+
+DROP VIEW IF EXISTS public.v_sales_register_gst_detail CASCADE;
 
 -- security_invoker = on: without it the view runs with the privileges of its
 -- owner (postgres, which has BYPASSRLS), so anon - a role every browser holds
@@ -583,7 +677,57 @@ LEFT JOIN cust_gstin cg ON cg.customer_no = d.customer_no
 LEFT JOIN public.ref_gst_state    bl ON bl.state_code = d.bill_to_state
 LEFT JOIN public.ref_gst_state    lo ON lo.state_code = d.location_state;
 
+-- Hand back what the DROP took from this view: its comment and any grant made
+-- outside this file. Runs BEFORE the REVOKE below so that revoke still wins,
+-- even if anon or authenticated had been granted something explicitly.
+DO $srgd_self$
+DECLARE
+    rec  record;
+    stmt text;
+BEGIN
+    FOR rec IN SELECT * FROM _srgd_self LOOP
+        IF rec.comment IS NOT NULL THEN
+            EXECUTE format('COMMENT ON VIEW public.v_sales_register_gst_detail IS %L',
+                           rec.comment);
+        END IF;
+        FOREACH stmt IN ARRAY COALESCE(rec.grants, ARRAY[]::text[]) LOOP
+            EXECUTE stmt;
+        END LOOP;
+    END LOOP;
+END
+$srgd_self$;
+
 -- DROP + CREATE above discards the view's grants, and Supabase's default
 -- privileges hand anon and authenticated everything on a fresh object. Take
 -- that back on every apply: nothing reaches this view over PostgREST.
 REVOKE ALL ON public.v_sales_register_gst_detail FROM anon, authenticated;
+
+-- Put back everything CASCADE took above: definition, storage options, owner,
+-- comment and grants, shallowest first so each one finds its source. Anything
+-- that fails here aborts the file's transaction, leaving both this view and
+-- its dependents exactly as they were.
+DO $srgd_restore$
+DECLARE
+    r       record;
+    stmt    text;
+    n       int := 0;
+BEGIN
+    FOR r IN SELECT * FROM _srgd_dependents ORDER BY depth, ident LOOP
+        EXECUTE format('CREATE VIEW %s %s AS %s', r.ident,
+                       CASE WHEN COALESCE(r.reloptions, '') = '' THEN ''
+                            ELSE 'WITH (' || r.reloptions || ')' END,
+                       r.definition);
+        EXECUTE format('ALTER VIEW %s OWNER TO %I', r.ident, r.owner);
+        IF r.comment IS NOT NULL THEN
+            EXECUTE format('COMMENT ON VIEW %s IS %L', r.ident, r.comment);
+        END IF;
+        FOREACH stmt IN ARRAY COALESCE(r.grants, ARRAY[]::text[]) LOOP
+            EXECUTE stmt;
+        END LOOP;
+        n := n + 1;
+    END LOOP;
+    IF n > 0 THEN
+        RAISE NOTICE 'rebuilt % dependent view(s) of v_sales_register_gst_detail', n;
+    END IF;
+END
+$srgd_restore$;

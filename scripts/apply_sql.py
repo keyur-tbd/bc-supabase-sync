@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import re
 import sys
 
 sys.path.insert(0, __file__.rsplit("scripts", 1)[0])
@@ -34,12 +35,27 @@ logger = logging.getLogger("bc_sync")
 SQL_DIR = pathlib.Path(__file__).resolve().parent.parent / "sql"
 
 
+DOLLAR_QUOTE = re.compile(r"\$[A-Za-z_]*\$")
+
+
 def statements(sql: str) -> list[str]:
     """Split on ';' after stripping whole-line comments.
 
     Good enough because these files keep no semicolons inside string literals;
     if that ever changes, this needs a real parser rather than a cleverer regex.
+
+    A DO block or a function body would be shredded by it - every ';' inside
+    the dollar-quoted body would become its own "statement" - so refuse rather
+    than send nonsense to the server. Only files carrying CREATE INDEX
+    CONCURRENTLY reach here; keep those free of dollar quoting, or split the
+    file in two.
     """
+    if DOLLAR_QUOTE.search(sql):
+        raise ValueError(
+            "cannot split a file that both needs CONCURRENTLY (so, no "
+            "transaction) and contains a dollar-quoted body - put one of them "
+            "in its own file"
+        )
     body = "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--"))
     return [s.strip() for s in body.split(";") if s.strip()]
 

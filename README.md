@@ -521,6 +521,32 @@ on a fresh database do not exist until the sync creates them. A rebuild is
 therefore self-healing: sync creates the tables, then the SQL step rebuilds the
 view, lookup and indexes on top.
 
+### Views elsewhere that read this one
+
+The view is rebuilt with DROP + CREATE (a plain `CREATE OR REPLACE` cannot
+change a column's type, and these expressions do as the derivation is refined).
+Objects outside this repo select from it - `warehouse.v_sales_register_gst_detail`
+wraps it for the returns dashboard - and Postgres refuses to drop a view that
+something depends on, which is exactly how the 2026-09-04 05:34 UTC run went
+red: `cannot drop view v_sales_register_gst_detail because other objects depend
+on it`.
+
+`sql/02_*.sql` now records every dependent view first - definition, owner,
+storage options, comment and grants - drops CASCADE, and rebuilds them after
+the CREATE. Grants made by hand on the view itself (`birbal_register_reader`)
+are captured and replayed the same way; before this they were silently revoked
+on every apply.
+
+Two things to know if you change the view's columns:
+
+* Dropping or renaming a column a dependent selects makes the rebuild fail.
+  The file is one transaction, so nothing is committed - the SQL step goes red
+  with the dependent's own error and both views stay as they were. Fix the
+  dependent (it lives in whichever project owns it), then re-run.
+* A **materialized** view depending on this one is refused outright, because
+  rebuilding it from its definition would leave it empty until someone
+  refreshed it. Drop it before the apply, or point it at a copy.
+
 ### Validation against the BC register exports, April-August 2026
 
 Checked row by row against the report's own monthly output (transfer shipments
