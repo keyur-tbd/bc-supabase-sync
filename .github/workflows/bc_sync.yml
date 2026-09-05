@@ -15,6 +15,17 @@ on:
         options:
           - incremental
           - full
+      services:
+        # Space-separated service names from config/web_services.json, e.g.
+        # "Posted_Sales_Credit_Memo_Lines_Excel". Empty means every service.
+        # Pair it with mode=full to backfill ONE service without re-pulling the
+        # 6.2M-row general ledger - which is what filled the disk on
+        # 2026-08-28. Names are validated below; an unknown one fails the run
+        # rather than silently syncing nothing.
+        description: "Limit to these services (space-separated; blank = all)"
+        required: false
+        default: ""
+        type: string
 
 # A backfill can outlast the 2-hourly cron. Without this, the next tick starts
 # a second sync that races the first on etl_sync_state and, worse, on the
@@ -41,6 +52,30 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      # BEFORE the sync: schema the sync itself depends on. Nothing here may
+      # read bc_* data - that belongs in sql/, which runs after. Today it holds
+      # the credit-memo lines primary key, which the upsert's ON CONFLICT has
+      # to match; applying it afterwards would cost one more failed run.
+      - name: Apply sql/pre/ (schema the sync depends on)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_DB_SCHEMA: ${{ vars.SUPABASE_DB_SCHEMA || 'public' }}
+          SUPABASE_DB_SSLROOTCERT: ${{ github.workspace }}/prod-ca-2021.crt
+          SUPABASE_DB_SSLMODE: verify-full
+          PG_LOWERCASE_COLUMNS: ${{ vars.PG_LOWERCASE_COLUMNS || 'false' }}
+          SUPABASE_RAW_JSON_EXCLUDE_TABLES: >-
+            ${{ vars.SUPABASE_RAW_JSON_EXCLUDE_TABLES || '*' }}
+          SUPABASE_DISK_LIMIT_GB: ${{ vars.SUPABASE_DISK_LIMIT_GB || '50' }}
+          SUPABASE_DISK_STOP_PCT: ${{ vars.SUPABASE_DISK_STOP_PCT || '85' }}
+          # config.py requires these at import time even though no BC call is made.
+          BC_CLIENT_ID: ${{ secrets.BC_CLIENT_ID }}
+          BC_CLIENT_SECRET: ${{ secrets.BC_CLIENT_SECRET }}
+          BC_TENANT_ID: ${{ secrets.BC_TENANT_ID }}
+          BC_ENVIRONMENT: ${{ secrets.BC_ENVIRONMENT }}
+          BC_COMPANY_ID: ${{ secrets.BC_COMPANY_ID }}
+        run: |
+          python scripts/apply_sql.py sql/pre
 
       - name: Run sync
         env:
@@ -82,7 +117,14 @@ jobs:
           GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
           GMAIL_SENDER: ${{ secrets.GMAIL_SENDER }}
         run: |
-          python app.py --mode ${{ github.event.inputs.mode || 'incremental' }}
+          # One --service flag per name. Unquoted expansion is what splits
+          # them, so the names must not contain spaces - they are identifiers
+          # from config/web_services.json, and app.py rejects an unknown one.
+          args=""
+          for s in ${{ github.event.inputs.services }}; do
+            args="$args --service $s"
+          done
+          python app.py --mode ${{ github.event.inputs.mode || 'incremental' }} $args
 
       # BC does not serve page 300 over OData V4 in this tenant (investigated
       # 2026-09-01/02 - the entity set is absent from both the OData catalogue

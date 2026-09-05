@@ -13,7 +13,12 @@ EXISTS), so running this on every sync is a no-op when nothing has changed.
 RUN IT AFTER THE SYNC, not before: the view selects from the bc_* tables, so on
 a fresh database they have to exist first.
 
-    python scripts/apply_sql.py
+    python scripts/apply_sql.py            # sql/  - after the sync
+    python scripts/apply_sql.py sql/pre    # sql/pre/ - before it
+
+sql/pre/ is the exception: schema changes the sync itself depends on, such as a
+primary key the upsert's ON CONFLICT has to match. Those cannot wait until
+after the run that needs them. Keep it empty of anything that reads bc_* data.
 """
 from __future__ import annotations
 
@@ -62,9 +67,12 @@ def statements(sql: str) -> list[str]:
 
 def main() -> int:
     setup_logger()
-    files = sorted(SQL_DIR.glob("*.sql"))
+    root = pathlib.Path(__file__).resolve().parent.parent
+    sql_dir = root / sys.argv[1] if len(sys.argv) > 1 else SQL_DIR
+    # Only the top level: sql/ must not pick up sql/pre/, which has already run.
+    files = sorted(p for p in sql_dir.glob("*.sql") if p.is_file())
     if not files:
-        logger.error(f"No .sql files found in {SQL_DIR} - nothing to apply.")
+        logger.error(f"No .sql files found in {sql_dir} - nothing to apply.")
         return 1
 
     engine = SupabaseService(load_supabase_config())._engine

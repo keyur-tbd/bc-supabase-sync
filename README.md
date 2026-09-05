@@ -138,8 +138,12 @@ bc_supabase_sync/
 ├── config/
 │   └── web_services.json           # generated from the BC web services Excel export
 ├── scripts/
+│   ├── apply_sql.py                # applies sql/ (after the sync) or sql/pre/ (before it)
 │   ├── generate_config_from_excel.py
 │   └── reclaim_vacuum_full.py      # guarded VACUUM FULL, smallest table first (see Storage)
+├── sql/
+│   ├── *.sql                       # view, lookups, indexes - applied AFTER the sync
+│   └── pre/                        # schema the sync depends on - applied BEFORE it
 ├── services/
 │   ├── auth_service.py             # OAuth2 client-credentials auth
 │   ├── bc_api_service.py           # paginated OData fetch + retries
@@ -461,6 +465,75 @@ Lines/detail tables also need a **composite primary key**, e.g.
 repeats across line rows, so a single-column key would overwrite lines.
 See `_new_table_templates` in `config/web_services.json` for copy-paste
 examples of both cases.
+
+### Key a lines table on the line, not on the item (2026-09-05)
+
+`Posted_Sales_Credit_Memo_Lines_Excel` was keyed `Document_No + No` — document
+number plus item/account number — which assumes a document never repeats an
+item. On 2026-09-04 at 12:47 UTC BC started returning credit memos that do:
+`27CNBLR-03447` carries Line_No 10000 (14 pcs, ₹1,135.96) and Line_No 20000
+(101 pcs, ₹12,292.71), both against G/L account 35120010, "SALES RETURN FG".
+Two rows, one key, one INSERT:
+
+    psycopg.errors.CardinalityViolation: ON CONFLICT DO UPDATE command cannot
+    affect row a second time
+
+Postgres rejects the whole 500-row batch, the run exits 3, and — because
+`series_key` derives its watermark from the highest document number *stored* —
+nothing advances. Every later run re-fetched the same documents and failed
+identically: six runs, ~13 hours, before anyone looked.
+
+**De-duplicating inside the batch would have been the wrong fix.** Measured
+against the Line_No-grained sibling feed (`bc_posted_sales_cr_memo_lines`, FY
+2026-27 only), one document repeats the same account in 8,450 groups covering
+19,779 lines — so a document+item key keeps 8,450 and silently drops **11,329
+lines, ₹3,03,03,893 and 499,960 units**, in a table Birbal can read.
+`27CNAHD-00018` alone posts four lines to account 35120010. Green pipeline,
+understated returns, nothing in any log.
+
+So the key moved to `(Document_No, Line_No)`, the real grain of a posted line
+and the key its sibling on the same BC page already uses. It was safe on the
+stored data: `Line_No` is a bigint with no nulls, and the pair was already
+unique across all 323,888 rows — the collapse had been dropping the extra lines
+rather than storing them wrong.
+
+**The rule this leaves:** a lines/detail table is keyed on the document plus
+its own line number. An item or account number is not a key — the same item can
+legitimately appear twice on one document. `_new_table_templates` in
+`config/web_services.json` shows the shape.
+
+#### Why `sql/pre/`
+
+`ON CONFLICT (...)` has to match a real unique constraint, so the primary-key
+swap must be in place *before* the sync that uses it. Everything in `sql/` runs
+**after** the sync (the register view selects from the `bc_*` tables, which on
+a fresh database do not exist until the sync creates them), so a migration like
+this cannot live there: the next run would still fail, just differently — "no
+unique or exclusion constraint matching the ON CONFLICT specification".
+
+`sql/pre/` is applied by a workflow step before `Run sync`:
+
+    python scripts/apply_sql.py sql/pre
+
+Only schema the sync itself depends on belongs there, and nothing in it may
+read `bc_*` data. `sql/pre/01_credit_memo_lines_key.sql` checks the current key
+first and does nothing once it is already the new one, so it is a no-op on
+every run after the first and on a fresh database.
+
+#### Recovering the rows the old key dropped
+
+The change stops the loss; it does not undo it. Posted documents are immutable,
+so re-pulling is safe and is an upsert — the previously-collapsed lines are
+simply inserted:
+
+    python app.py --mode full --service Posted_Sales_Credit_Memo_Lines_Excel
+
+`--mode full` clears the per-series watermark, so every series is re-fetched
+from its start. Do it for the ONE service — the workflow's `services` input
+(space-separated, blank means all) exists for exactly this. A blanket
+`--mode full` re-pulls the 6.2M-row general ledger too, which is what filled
+the disk on 2026-08-28. An unknown or disabled name is refused rather than
+skipped, so a typo cannot turn a backfill into a green no-op.
 
 ## Storage and the disk guard
 

@@ -152,15 +152,15 @@
       "enabled": true
     },
     {
-      "_NOTE": "Posted sales credit memo lines. PK is Document_No + No (item/account number) as configured. Lines with no No carry no product data and are not wanted: quarantine_missing_pk=false drops them quietly rather than refilling quarantine/ every run and pinning the service at partial_failure. Dropped counts show as skipped=N in the run summary. This page exposes NO date field of any kind, so sync_strategy is series_key: posted documents are immutable and their numbers only grow within a BC no.-series (26CNMUM-00001 ...), so 'above the highest number stored' is a complete window. One request per series - BC answers 501 to an OR of AND-groups - and 501 to 'not (...)', so new series are learned from series_source (the parent document table, which syncs by date) instead of from the API. Narrow rows (693 B/row -> 6.9 MB/page; 322k rows), so max_page_size 10000 rather than the 5000 default.",
+      "_NOTE": "Posted sales credit memo lines. PK is Document_No + Line_No since 2026-09-05. It was Document_No + No (item/account number), which assumed a document never repeats an item. BC posts credit memos that do - 27CNBLR-03447 carries two lines against G/L account 35120010 - and both rows then hold the same key inside one INSERT, so Postgres raised CardinalityViolation and every run from 2026-09-04 12:47 UTC failed here, the watermark never advancing past those documents. Collapsing the duplicates instead would have dropped 11,329 lines worth Rs 3.03 crore in FY 2026-27 alone, measured against the Line_No-grained sibling feed, so the key moved to the real grain of a posted line - the same key bc_posted_sales_cr_memo_lines uses on this page. The constraint swap lives in sql/pre/01_credit_memo_lines_key.sql, which runs BEFORE the sync because ON CONFLICT must match a real constraint. Rows collapsed before the change come back with --mode full --service Posted_Sales_Credit_Memo_Lines_Excel. Lines with no No carry no product data and are not wanted: quarantine_missing_pk=false drops them quietly rather than refilling quarantine/ every run and pinning the service at partial_failure. Dropped counts show as skipped=N in the run summary. This page exposes NO date field of any kind, so sync_strategy is series_key: posted documents are immutable and their numbers only grow within a BC no.-series (26CNMUM-00001 ...), so 'above the highest number stored' is a complete window. One request per series - BC answers 501 to an OR of AND-groups - and 501 to 'not (...)', so new series are learned from series_source (the parent document table, which syncs by date) instead of from the API. Narrow rows (693 B/row -> 6.9 MB/page; 322k rows), so max_page_size 10000 rather than the 5000 default.",
       "name": "Posted_Sales_Credit_Memo_Lines_Excel",
       "display_name": "Posted Sales Credit Memo Lines",
       "object_type": "Page",
       "object_id": 135,
       "table_name": "bc_posted_sales_credit_memo_lines",
       "primary_key": [
-        "Document_No.",
-        "No."
+        "Document_No",
+        "Line_No"
       ],
       "sync_strategy": "series_key",
       "enabled": true,

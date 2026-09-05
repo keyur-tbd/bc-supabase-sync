@@ -83,9 +83,19 @@ class SyncService:
     def run(self, mode: str = "incremental", service_filter: list[str] | None = None) -> list[SyncStats]:
         services = load_web_services()
         if service_filter:
+            # Name every unknown one. Silently syncing the names that DID match
+            # is the worst outcome for a scoped backfill: the run goes green
+            # having skipped the service somebody meant to fix. Disabled
+            # services are unknown here too - load_web_services drops them.
+            known = {s["name"] for s in services}
+            unknown = sorted(set(service_filter) - known)
+            if unknown:
+                raise ValueError(
+                    f"Unknown or disabled service(s): {', '.join(unknown)}. "
+                    f"Names come from the 'name' field of an enabled service "
+                    f"in config/web_services.json."
+                )
             services = [s for s in services if s["name"] in service_filter]
-            if not services:
-                raise ValueError(f"No matching services for filter: {service_filter}")
 
         if not self._db.test_connection():
             raise RuntimeError("Could not connect to Supabase/Postgres — aborting run.")
