@@ -682,15 +682,27 @@ that quietly omits it. After adding either, someone must run, as `postgres`:
 
 and add or update that table's `warehouse.warehouse_meta` row. The wrapper over
 the register (`select r.*, ...`) is NOT covered by that function: a column
-added to `sql/02_*.sql` needs migrations 009 + 011 of the Birbal repo re-run.
-The apply emits a `WARNING` naming the columns when it sees that drift, and
-re-runs `app.sync_register_reader_grants()` by itself when the register's
-dependency set has changed - but only then, because that function re-grants
-across all of `public` and locks every table in it.
+added to `sql/02_*.sql` needs a new migration in the Birbal repo that drops and
+recreates that wrapper (`create or replace` cannot insert a column into a
+frozen `select r.*`). The apply emits a `WARNING` naming the columns when it
+sees that drift, and re-runs `app.sync_register_reader_grants()` by itself when
+the register's dependency set has changed - but only then, because that
+function re-grants across all of `public` and locks every table in it.
 
-**Currently not exposed**, so Birbal cannot answer on them: `uw_sale_order`,
-`uw_sale_order_item` (the Uniware sale-order feed), `gads_campaigns`,
-`gads_asset_groups`, `gads_search_terms`. Bookkeeping tables (`etl_sync_state`,
+When you rebuild that wrapper, **start from
+`pg_get_viewdef('warehouse.v_sales_register_gst_detail'::regclass, true)`, not
+from the migration that created it.** Adding `line_no` on 2026-09-05 was done
+by copying migration 011, which by then was three migrations stale, and it
+dropped `is_packaging_material` - added by 015 along with a `channel_map` join,
+and the column their sales numbers filter on - from the live view. Postgres
+cannot object to a view that is merely wrong; it showed up only in a diff of
+the live column list against the repo. Reproduce what the view IS, not what it
+once was. (Fixed the same day by migration 025.)
+
+**Exposure moves fast on the Birbal side** - the `uw_sale_order`,
+`uw_sale_order_item` and `gads_*` gaps listed here on 2026-09-04 were wired up
+by their migration 023 the same day - so check with the queries below rather
+than trusting this paragraph. Bookkeeping tables (`etl_sync_state`,
 `ingest_*`, `workflow_logs`, `uw_sync_*`, `mp_loaded_files`, `_bk_*`) are
 excluded deliberately.
 
