@@ -55,6 +55,12 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
 
 
+# How many watermark-skipped documents one run will go back for. Steady state
+# is nought to a handful; the cap only matters if a service is misconfigured,
+# where it turns "tens of thousands of API calls" into a visible log line.
+GAP_SWEEP_LIMIT = 200
+
+
 def _odata_str(value: str) -> str:
     """Single-quoted OData string literal; an embedded quote is doubled."""
     return "'" + str(value).replace("'", "''") + "'"
@@ -321,6 +327,7 @@ class SyncService:
         src = service.get("series_source") or {}
 
         highs = self._db.max_by_series(table_name, field, sep)
+        first_run = not highs
 
         # First ever run, or an explicit --mode full: take the lot, unfiltered
         # - unless a series_source is configured, in which case the parent
@@ -382,6 +389,33 @@ class SyncService:
                 total_p += p
                 total_f += f
                 self._db.save_resume_point(name, next_url, total_p)
+
+        # A document numbered BELOW its series' stored maximum is invisible to
+        # the watermark for ever - see keys_missing_rows. The parent table
+        # syncs by date and does have it, so ask that instead and fetch each
+        # gap by name. Skipped on a full pull (which just fetched everything)
+        # and on the first run (an empty table makes every parent a gap).
+        if src.get("table") and src.get("column") and mode != "full" and not first_run:
+            missing = self._db.keys_missing_rows(
+                src["table"], src["column"], table_name, field,
+                date_column=src.get("date_column"), min_date=src.get("min_date"),
+                limit=service.get("series_gap_sweep_limit", GAP_SWEEP_LIMIT),
+            )
+            if missing:
+                logger.info(
+                    f"[{name}] Series-key: {len(missing)} document(s) in {src['table']} "
+                    f"have no rows here - the watermark cannot reach them, so "
+                    f"fetching each by name: {', '.join(missing[:10])}"
+                    f"{' ...' if len(missing) > 10 else ''}"
+                )
+                for doc in missing:
+                    for records, next_url in self._api.fetch_pages(
+                        name, odata_filter=f"{field} eq {_odata_str(doc)}", order_by=field
+                    ):
+                        p, f = self._process_page(name, table_name, primary_key, None, records,
+                                                  stats, quarantine_invalid=quarantine_invalid)
+                        total_p += p
+                        total_f += f
         return total_p, total_f
 
     def _run_full_refresh(self, state, stats, name, table_name, primary_key,

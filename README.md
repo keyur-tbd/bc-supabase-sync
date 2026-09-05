@@ -520,6 +520,41 @@ read `bc_*` data. `sql/pre/01_credit_memo_lines_key.sql` checks the current key
 first and does nothing once it is already the new one, so it is a no-op on
 every run after the first and on a fresh database.
 
+#### When the watermark cannot reach a document
+
+`series_key` fetches "everything above the highest number already stored",
+which is complete only while BC issues numbers in posting order. It does not
+always. Three credit memos were **created in June 2026 and posted on
+2026-09-04** with numbers below their series' stored maximum:
+
+    27CNAHD-00730   series max stored 27CNAHD-00736
+    27CNHYD-01201   series max stored 27CNHYD-01206
+    27CNMUM-07699   series max stored 27CNMUM-07741
+
+Nothing errored. The lines sync simply never asked for them, and never would
+have: 141 lines absent from `bc_posted_sales_cr_memo_lines`, so
+`v_sales_register_gst_detail` returned **zero rows** for all three documents -
+in the table Birbal's dictionary calls the primary source for invoiced sales
+and returns, and describes as complete from 2026-04-01.
+
+The parent document table syncs by DATE, so it *does* have them. After the
+per-series requests, a series_key service with a `series_source` now asks the
+parent table for documents with no rows of their own and fetches each by name
+(`Document_No eq '...'`). Skipped on `--mode full`, which has just fetched
+everything, and on a first run, when an empty table makes every parent a gap.
+
+**Scope has to match the main loop's**, or the sweep is not a sweep but a
+backlog: without the `series_source` date floor, 78,966 pre-April-2026 invoices
+look like missing documents. With it, the same query returns 0 for the invoice
+lines and the standalone credit-memo lines, and exactly the real gaps for the
+Line_No-grained feed. `GAP_SWEEP_LIMIT` (200, or `series_gap_sweep_limit` per
+service) caps a misconfiguration at a visible log line rather than tens of
+thousands of API calls.
+
+It only detects documents with NO rows at all. A document whose lines were
+partly stored is still invisible; the case has not been seen, and catching it
+would mean comparing line counts BC does not expose on the parent.
+
 #### Recovering the rows the old key dropped
 
 The change stops the loss; it does not undo it. Posted documents are immutable,

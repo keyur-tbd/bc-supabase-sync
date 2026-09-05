@@ -602,6 +602,62 @@ class SupabaseService:
             rows = conn.execute(sql, {"sep": separator, "min_date": min_date}).fetchall()
         return {r[0] for r in rows if r[0]}
 
+    def keys_missing_rows(
+        self,
+        parent_table: str,
+        parent_column: str,
+        child_table: str,
+        child_column: str,
+        date_column: str | None = None,
+        min_date: str | None = None,
+        limit: int = 200,
+    ) -> list[str]:
+        """Parent keys with no row at all in the child table, highest first.
+
+        series_key fetches "everything above the highest number stored", which
+        is complete only while BC issues numbers in posting order. It does not
+        always: 27CNAHD-00730, 27CNHYD-01201 and 27CNMUM-07699 were created in
+        June 2026 and posted on 2026-09-04 with numbers BELOW their series'
+        stored maximum, so the lines sync skipped them - and would have skipped
+        them for good. 141 lines the sales register, and so Birbal, never had.
+
+        The parent document table syncs by DATE, so it does see those
+        documents. Anything sitting in it with no lines is a gap worth going
+        back for.
+
+        `date_column`/`min_date` must be the same scope the caller's main loop
+        uses. Without them the answer is the whole backlog rather than the
+        gaps: the invoice-lines service is limited to FY 2026-27, and 78,966
+        pre-April parents would otherwise each look like a missing document.
+
+        Returns at most `limit` keys so a misconfiguration cannot turn one run
+        into tens of thousands of API calls.
+        """
+        pcol = normalize_column_name(parent_column)
+        ccol = normalize_column_name(child_column)
+        if not self._existing_columns(parent_table) or not self._existing_columns(child_table):
+            return []
+
+        where_date = ""
+        params: dict[str, Any] = {"lim": limit}
+        if date_column and min_date:
+            dcol = normalize_column_name(date_column)
+            where_date = f"  AND p.{quote_ident(dcol)} >= CAST(:min_date AS DATE)\n"
+            params["min_date"] = min_date
+
+        sql = text(
+            f"SELECT p.{quote_ident(pcol)} AS k\n"
+            f"FROM {qualified_table(self._schema, parent_table)} p\n"
+            f"WHERE p.{quote_ident(pcol)} IS NOT NULL AND p.{quote_ident(pcol)} <> ''\n"
+            f"{where_date}"
+            f"  AND NOT EXISTS (SELECT 1 FROM {qualified_table(self._schema, child_table)} c\n"
+            f"                   WHERE c.{quote_ident(ccol)} = p.{quote_ident(pcol)})\n"
+            f"ORDER BY p.{quote_ident(pcol)} DESC\n"
+            f"LIMIT :lim"
+        )
+        with self._engine.connect() as conn:
+            return [r[0] for r in conn.execute(sql, params).fetchall()]
+
     # ---------- upserts ----------
 
     def upsert_rows(
