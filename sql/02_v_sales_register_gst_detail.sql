@@ -654,7 +654,17 @@ SELECT
     COALESCE(d.state_dim, '')                             AS "STATE CODE",
     COALESCE(d.bu_dim, '')                                AS "BU CODE",
     COALESCE(d.prn_document_no, '')                       AS "PRN Document No.",
-    COALESCE(d.external_document_no, '')                  AS "External Document No."
+    COALESCE(d.external_document_no, '')                  AS "External Document No.",
+    -- NOT one of the report's columns, and deliberately lower case to say so.
+    -- BC prints no line number, so two lines of the same document, item,
+    -- quantity and amount are indistinguishable in its output: 135 groups of
+    -- byte-identical rows across 360,223, every one of them a genuinely
+    -- distinct posted line (27CNHYD-00794 posts FG/0137 five times - qty 10,
+    -- then 1, 1, 1, 1). Without this column the honest reading of an export is
+    -- ambiguous, and "de-duplicating" it silently deletes real returns.
+    -- Appended LAST so an export still lines up with the report column for
+    -- column up to here.
+    d.line_no                                             AS line_no
 FROM doc d
 LEFT JOIN gst g
        ON g.doc_no = d.doc_no
