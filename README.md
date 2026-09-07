@@ -706,6 +706,16 @@ than trusting this paragraph. Bookkeeping tables (`etl_sync_state`,
 `ingest_*`, `workflow_logs`, `uw_sync_*`, `mp_loaded_files`, `_bk_*`) are
 excluded deliberately.
 
+**Derived objects this repo owns but does not auto-apply.** The order-to-cash
+bridge (`o2c/`, six materialized views joining the posted invoices to the GRN
+feeds and short-GRN credit memos; Birbal reads `warehouse.o2c_*`) is rebuilt
+by hand and refreshed twice a day by `.github/workflows/o2c_refresh.yml`. Its
+`warehouse` views are hand-made, so `app.sync_warehouse_views()` neither
+creates nor drops them; and because materialized views cannot carry RLS, the
+`anon` grant Supabase hands every new `public` object is revoked explicitly at
+the end of `o2c/o2c_bridge.sql`. The anon check below must stay empty after a
+rebuild. Details in `o2c/README.md`.
+
 ### Checks worth running after any schema change
 
     -- public tables with no warehouse view (invisible to Birbal)

@@ -1,0 +1,39 @@
+name: Order-to-cash bridge refresh
+
+# Rebuilds the o2c_* materialized views (PO -> invoice -> GRN -> credit memo) that Birbal reads as
+# warehouse.o2c_bridge / o2c_invoices / o2c_credit_memos / o2c_grn_lines. The views are defined in o2c/
+# and applied by hand (see o2c/README.md); this workflow only refreshes them.
+#
+# Twice a day: after the morning BC sync + the 07:00 IST GRN sheet loads, and again in the evening.
+# select public.o2c_refresh() takes 6-10 minutes; the views with a unique index refresh CONCURRENTLY, so
+# Birbal's queries are not blocked while it runs.
+
+on:
+  schedule:
+    - cron: "30 3 * * *"    # 09:00 IST
+    - cron: "30 12 * * *"   # 18:00 IST
+  workflow_dispatch:
+
+concurrency:
+  group: o2c-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout repository (for the Supabase root certificate)
+        uses: actions/checkout@v4
+
+      - name: Refresh the bridge
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PGSSLMODE: verify-full
+          PGSSLROOTCERT: ${{ github.workspace }}/prod-ca-2021.crt
+          PGCONNECT_TIMEOUT: "30"
+        run: |
+          psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 \
+            -c "set statement_timeout = '1800000'" \
+            -c "select public.o2c_refresh()" \
+            -c "select (select max(invoice_date) from public.o2c_invoice_hdr) as bridge_max_invoice_date, (select count(*) from public.o2c_bridge) as bridge_lines"
