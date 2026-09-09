@@ -338,6 +338,19 @@ begin
     exception when others then
         raise warning 'feed_inventory refresh failed: %', sqlerrm;
     end;
+    -- Birbal migration 036 (2026-09-09): the returns-capping ledger (mv_rtv_capping_ledger)
+    -- is built off the same GST register, and until now it was on no beat at all -- it only
+    -- moved when someone ran it by hand, so the provision Birbal quotes could be weeks
+    -- behind the sales it provides against. ~10s. Its own block, not shared with the
+    -- others, so one failing surface does not skip the next.
+    begin
+        perform public.rtv_capping_refresh();
+    exception
+        when undefined_function then
+            raise warning 'rtv_capping_refresh() not present (Birbal migration 036 not applied); skipped';
+        when others then
+            raise warning 'rtv_capping_refresh failed: %', sqlerrm;
+    end;
     -- Birbal migration 039 (2026-09-09): the costed sales register (mv_sales_cogs,
     -- RM/PM cost per line) is built off the same GST register the bridge reads, so it
     -- goes stale on the same beat. ~25s. Same rule as above: a failure here must not
