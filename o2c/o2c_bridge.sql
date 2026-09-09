@@ -338,6 +338,19 @@ begin
     exception when others then
         raise warning 'feed_inventory refresh failed: %', sqlerrm;
     end;
+    -- Birbal migration 039 (2026-09-09): the costed sales register (mv_sales_cogs,
+    -- RM/PM cost per line) is built off the same GST register the bridge reads, so it
+    -- goes stale on the same beat. ~25s. Same rule as above: a failure here must not
+    -- fail the o2c refresh, and the function is created by the Birbal migration, so
+    -- guard against it not existing yet on a database that has not run 039.
+    begin
+        perform public.cogs_refresh();
+    exception
+        when undefined_function then
+            raise warning 'cogs_refresh() not present (Birbal migration 039 not applied); skipped';
+        when others then
+            raise warning 'cogs_refresh failed: %', sqlerrm;
+    end;
     return 'o2c refreshed in ' || round(extract(epoch from clock_timestamp() - t0)) || 's at ' || now();
 end $$;
 
