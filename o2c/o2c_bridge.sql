@@ -307,6 +307,15 @@ begin
     refresh materialized view public.o2c_grn_matched;
     refresh materialized view concurrently public.o2c_credit_memos;
     refresh materialized view concurrently public.o2c_bridge;
+    -- Birbal migration 037 (2026-09-09): rebuild the "what data exists" inventory on the
+    -- same beat (~4.5 min; it counts every warehouse relation). Birbal answers "do you
+    -- have X data" from warehouse.feed_inventory, so it must not go stale -- but a probe
+    -- failure must never fail the o2c refresh, hence the exception block.
+    begin
+        perform app.refresh_feed_inventory();
+    exception when others then
+        raise warning 'feed_inventory refresh failed: %', sqlerrm;
+    end;
     return 'o2c refreshed in ' || round(extract(epoch from clock_timestamp() - t0)) || 's at ' || now();
 end $$;
 
@@ -314,19 +323,45 @@ end $$;
 -- Birbal migration 031 (2026-09-08): platform is resolved at SHIP-TO level through
 -- warehouse.channel_map_locations so Reliance Retail's Milkbasket locations and its
 -- stores/DCs come out as two platforms. Keep this shape; a plain wrapper undoes it.
+-- Birbal migration 035 (2026-09-09): an invoice carrying a credit memo with return
+-- reason code INC is CANCELLED even though BC never set "Cancelled" on it (the
+-- accounts team credits with reason INC instead of using the Correct action: 721
+-- invoices, Rs 2.17 crore FY27, against 201 BC-flagged ones). invoice_status,
+-- grn_coverage, credit_status and the short_* columns are overridden so a cancelled
+-- line looks the same whichever way it was cancelled, and cancellation_kind /
+-- cancellation_memo_no say which. Keep this too; a plain wrapper puts Rs 2.17 crore
+-- of reversed billing back into every fill rate and pending list.
 create or replace view warehouse.o2c_bridge as
+with inc as (
+  select cm.invoice_no,
+         string_agg(distinct cm.credit_memo_no, ', ' order by cm.credit_memo_no) as inc_cm_nos
+  from public.o2c_credit_memos cm
+  where coalesce(cm.reason_code, '') = 'INC' and cm.invoice_no is not null
+  group by cm.invoice_no
+)
 select b.po_number, b.po_number_raw, b.po_suffixed,
        coalesce(l.platform, b.platform) as platform,
        b.customer_no, b.customer_name, b.customer_search_name, b.po_invoice_pattern,
        b.ship_to_code, b.ship_to_name, b.warehouse_code, b.so_no,
-       b.invoice_no, b.invoice_date, b.invoice_status, b.cancellation_cm_no, b.replacement_invoice_no, b.replaces_invoice_no,
+       b.invoice_no, b.invoice_date,
+       case when b.invoice_status = 'CANCELLED' or inc.invoice_no is not null then 'CANCELLED' else 'LIVE' end as invoice_status,
+       b.cancellation_cm_no, b.replacement_invoice_no, b.replaces_invoice_no,
        b.erp_item_no, b.item_name, b.item_category, b.po_qty, b.invoiced_qty, b.unit_price, b.invoiced_value,
        b.grn_feed, b.grn_nos, b.grn_date, b.grn_qty, b.grn_rejected_qty, b.grn_reject_reason, b.grn_duplicate_rows,
-       b.grn_match_method, b.grn_coverage, b.short_qty, b.excess_qty, b.short_value,
-       b.shgrn_cm_nos, b.shgrn_cm_qty, b.shgrn_cm_value, b.credit_status
+       b.grn_match_method,
+       case when inc.invoice_no is not null then 'CANCELLED_INVOICE' else b.grn_coverage end as grn_coverage,
+       case when inc.invoice_no is not null then null::numeric else b.short_qty end as short_qty,
+       case when inc.invoice_no is not null then null::numeric else b.excess_qty end as excess_qty,
+       case when inc.invoice_no is not null then null::numeric else b.short_value end as short_value,
+       b.shgrn_cm_nos, b.shgrn_cm_qty, b.shgrn_cm_value,
+       case when inc.invoice_no is not null then 'INVOICE_CANCELLED' else b.credit_status end as credit_status,
+       case when b.invoice_status = 'CANCELLED' then 'BC_CANCELLED'
+            when inc.invoice_no is not null    then 'INC_MEMO' end as cancellation_kind,
+       coalesce(b.cancellation_cm_no, inc.inc_cm_nos) as cancellation_memo_no
 from public.o2c_bridge b
 left join warehouse.channel_map_locations l
-       on l.customer_no = b.customer_no and l.ship_to_code = b.ship_to_code;
+       on l.customer_no = b.customer_no and l.ship_to_code = b.ship_to_code
+left join inc on inc.invoice_no = b.invoice_no;
 create or replace view warehouse.o2c_invoices as
 select po_number, po_number_raw, po_suffixed, platform, customer_no, customer_name, customer_search_name, po_invoice_pattern, ship_to_code, ship_to_name, warehouse_code, so_no,
        invoice_no, invoice_date, invoice_status, cancellation_cm_no, replacement_invoice_no, replaces_invoice_no,
@@ -342,10 +377,12 @@ select po_number, po_number_raw, po_suffixed, platform, customer_no, customer_na
             when bool_or(credit_status = 'CREDITED_NO_GRN_VISIBILITY') then 'CREDITED_NO_GRN_VISIBILITY'
             when bool_and(credit_status in ('GRN_FULL', 'CREDITED_WITHOUT_SHORTAGE')) then 'GRN_FULL'
             when bool_or(credit_status = 'GRN_FULL') then 'PARTLY_VISIBLE_GRN_FULL'
-            else 'GRN_NOT_AVAILABLE' end as credit_status
+            else 'GRN_NOT_AVAILABLE' end as credit_status,
+       cancellation_kind, cancellation_memo_no
 from warehouse.o2c_bridge
 group by po_number, po_number_raw, po_suffixed, platform, customer_no, customer_name, customer_search_name, po_invoice_pattern, ship_to_code, ship_to_name, warehouse_code, so_no,
-         invoice_no, invoice_date, invoice_status, cancellation_cm_no, replacement_invoice_no, replaces_invoice_no;
+         invoice_no, invoice_date, invoice_status, cancellation_cm_no, replacement_invoice_no, replaces_invoice_no,
+         cancellation_kind, cancellation_memo_no;
 -- Birbal migration 033 (2026-09-09): a cancelled invoice must never be counted or listed
 -- anywhere, so these two LIVE-only views are the surface Birbal actually queries; the
 -- unfiltered ones above stay for cancellation/re-invoicing questions only. Recreate them
