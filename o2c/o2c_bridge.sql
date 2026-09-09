@@ -135,6 +135,25 @@ create index on public.o2c_grn_lines (po_number);
 create index on public.o2c_grn_lines (feed, grn_row_id);
 
 -- ------------------------------------------------------------------ 4. resolve each GRN line to an invoice (cascade)
+-- Invoice number first, PO as the fallback (2026-09-09, Keyur). The partner sometimes keys
+-- the WRONG invoice number against a PO -- Blinkit ZHPL quoted '27BLR-02870-01' on PO
+-- CPCKA27-PO-3555778, which is our 27BLR-03550 -- and the number match then hands the
+-- receipt to the wrong invoice: 27BLR-02870 read 196 units received against 98 invoiced
+-- (GRN_FULL, 98 excess) while 27BLR-03550 read NOT_FOUND.
+--
+-- The guard therefore sits on priority 3 (invoice_core) ONLY, not on priority 1
+-- (invoice_exact). That split is not a guess -- it is what the data says. Of the 935 rows
+-- where a number match contradicts the feed's own PO:
+--   * all 892 invoice_exact ones quote our invoice number VERBATIM (nb_grn 503, reliance_grn
+--     242, instamart_grn 61, hyperpure_grn 40, milkbasket_grn 35, mraws_grn 11). There the
+--     number is right and the PO is the unreliable side: the feed truncates it (NB sends
+--     9200435706 for our 92004357060) or our External_Document_No is not the partner's PO at
+--     all (Reliance 58910, Instamart 5015631). Overriding those with the PO moved 30 Nature's
+--     Basket invoices to NOT_FOUND and ADDED 1,234 units of false excess -- measured, rejected.
+--   * all 43 invoice_core ones (hyperpure 26, instamart 17) quote something that is NOT one of
+--     our numbers, so the 5-digit-core guess is the weakest evidence in the cascade and a PO
+--     that resolves to a real invoice beats it.
+-- Priority 2 (invoice_core+po) already required PO equality; this is the same test on 3.
 create materialized view public.o2c_grn_matched as
 select g.*, r.invoice_no, r.match_method
 from public.o2c_grn_lines g
@@ -148,6 +167,9 @@ left join lateral (
         select h.invoice_no, 3, 'invoice_core' from public.o2c_invoice_hdr h
          where g.cand_num5 is not null and g.cand_branch is not null and h.num5 = g.cand_num5 and h.branch = g.cand_branch and h.customer_no = any(g.customer_nos)
            and (select count(*) from public.o2c_invoice_hdr x where x.num5 = g.cand_num5 and x.branch = g.cand_branch and x.customer_no = any(g.customer_nos)) = 1
+           and (g.po_number = '' or h.po_number_u = g.po_number
+                or not exists (select 1 from public.o2c_invoice_hdr x
+                               where x.po_number_u = g.po_number and x.customer_no = any(g.customer_nos) and not x.cancelled))
         union all
         select h.invoice_no, 4, 'po_unique' from public.o2c_invoice_hdr h
          where g.po_number <> '' and h.po_number_u = g.po_number and h.customer_no = any(g.customer_nos) and not h.cancelled
