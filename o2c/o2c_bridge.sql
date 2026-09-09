@@ -311,7 +311,22 @@ begin
 end $$;
 
 -- ------------------------------------------------------------------ Birbal surface
-create or replace view warehouse.o2c_bridge as select * from public.o2c_bridge;
+-- Birbal migration 031 (2026-09-08): platform is resolved at SHIP-TO level through
+-- warehouse.channel_map_locations so Reliance Retail's Milkbasket locations and its
+-- stores/DCs come out as two platforms. Keep this shape; a plain wrapper undoes it.
+create or replace view warehouse.o2c_bridge as
+select b.po_number, b.po_number_raw, b.po_suffixed,
+       coalesce(l.platform, b.platform) as platform,
+       b.customer_no, b.customer_name, b.customer_search_name, b.po_invoice_pattern,
+       b.ship_to_code, b.ship_to_name, b.warehouse_code, b.so_no,
+       b.invoice_no, b.invoice_date, b.invoice_status, b.cancellation_cm_no, b.replacement_invoice_no, b.replaces_invoice_no,
+       b.erp_item_no, b.item_name, b.item_category, b.po_qty, b.invoiced_qty, b.unit_price, b.invoiced_value,
+       b.grn_feed, b.grn_nos, b.grn_date, b.grn_qty, b.grn_rejected_qty, b.grn_reject_reason, b.grn_duplicate_rows,
+       b.grn_match_method, b.grn_coverage, b.short_qty, b.excess_qty, b.short_value,
+       b.shgrn_cm_nos, b.shgrn_cm_qty, b.shgrn_cm_value, b.credit_status
+from public.o2c_bridge b
+left join warehouse.channel_map_locations l
+       on l.customer_no = b.customer_no and l.ship_to_code = b.ship_to_code;
 create or replace view warehouse.o2c_invoices as
 select po_number, po_number_raw, po_suffixed, platform, customer_no, customer_name, customer_search_name, po_invoice_pattern, ship_to_code, ship_to_name, warehouse_code, so_no,
        invoice_no, invoice_date, invoice_status, cancellation_cm_no, replacement_invoice_no, replaces_invoice_no,
@@ -328,9 +343,18 @@ select po_number, po_number_raw, po_suffixed, platform, customer_no, customer_na
             when bool_and(credit_status in ('GRN_FULL', 'CREDITED_WITHOUT_SHORTAGE')) then 'GRN_FULL'
             when bool_or(credit_status = 'GRN_FULL') then 'PARTLY_VISIBLE_GRN_FULL'
             else 'GRN_NOT_AVAILABLE' end as credit_status
-from public.o2c_bridge
+from warehouse.o2c_bridge
 group by po_number, po_number_raw, po_suffixed, platform, customer_no, customer_name, customer_search_name, po_invoice_pattern, ship_to_code, ship_to_name, warehouse_code, so_no,
          invoice_no, invoice_date, invoice_status, cancellation_cm_no, replacement_invoice_no, replaces_invoice_no;
+-- Birbal migration 033 (2026-09-09): a cancelled invoice must never be counted or listed
+-- anywhere, so these two LIVE-only views are the surface Birbal actually queries; the
+-- unfiltered ones above stay for cancellation/re-invoicing questions only. Recreate them
+-- whenever the two views above are recreated, and keep the column list of those two
+-- unchanged (create or replace will refuse a shape change while these depend on it).
+create or replace view warehouse.o2c_bridge_live as
+select * from warehouse.o2c_bridge where invoice_status = 'LIVE';
+create or replace view warehouse.o2c_invoices_live as
+select * from warehouse.o2c_invoices where invoice_status = 'LIVE';
 create or replace view warehouse.o2c_credit_memos as select * from public.o2c_credit_memos;
 create or replace view warehouse.o2c_grn_lines as
 select feed, platform, po_number, invoice_ref_raw, invoice_no, match_method, grn_no, grn_date, feed_item_code, erp_item_no, received_qty, ordered_qty, rejected_qty, reject_reason, source_file
@@ -339,7 +363,7 @@ create or replace view warehouse.ref_customer_invoicing as select * from public.
 create or replace view warehouse.zepto_grn as select * from public.zepto_grn;
 create or replace view warehouse.amazon_grn as select * from public.amazon_grn;
 grant select on warehouse.zepto_grn, warehouse.amazon_grn to birbal_scope_df78b2a571ce4041b7b1db77c72cb69e;
-grant select on warehouse.o2c_bridge, warehouse.o2c_invoices, warehouse.o2c_credit_memos, warehouse.o2c_grn_lines, warehouse.ref_customer_invoicing to birbal_scope_df78b2a571ce4041b7b1db77c72cb69e;
+grant select on warehouse.o2c_bridge, warehouse.o2c_invoices, warehouse.o2c_bridge_live, warehouse.o2c_invoices_live, warehouse.o2c_credit_memos, warehouse.o2c_grn_lines, warehouse.ref_customer_invoicing to birbal_scope_df78b2a571ce4041b7b1db77c72cb69e;
 grant select on public.o2c_bridge, public.o2c_credit_memos, public.o2c_grn_matched, public.ref_customer_invoicing to birbal_scope_df78b2a571ce4041b7b1db77c72cb69e;
 -- Supabase's default privileges hand every new object in public to anon/authenticated (the keys that ship in
 -- browsers). Tables are protected by an empty RLS policy set; materialized views cannot have RLS, so the grant
