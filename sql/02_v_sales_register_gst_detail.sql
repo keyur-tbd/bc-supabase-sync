@@ -65,6 +65,26 @@
 --                                   see scripts/load_ship_to_address_soap.py)
 --   ref_gst_state                   'MH' -> '27-MAHARASHTRA'
 -- =============================================================================
+--
+-- Applying this file means dropping and rebuilding every view below it - 29 of
+-- them as of 2026-09-09, two of them matviews holding data. That is the right
+-- price for a real change and pure waste every other run, so this file opts
+-- out of the 2-hourly re-apply: scripts/apply_sql.py runs the query below and
+-- skips the file when the answer still matches what was recorded the last time
+-- it applied. The fingerprint covers exactly what this file controls - the
+-- view's definition, its reloptions (security_invoker) and its grants - so a
+-- hand-edit of any of the three brings the rebuild back, while a new dependent
+-- appearing downstream does not (it changes nothing this file is asserting).
+--
+-- fingerprint: SELECT md5(coalesce(pg_get_viewdef(c.oid, true), '') || '|' ||
+--                  coalesce(array_to_string(c.reloptions, ','), '') || '|' ||
+--                  coalesce((SELECT string_agg(a.privilege_type || ':' ||
+--                                   CASE WHEN a.grantee = 0 THEN 'PUBLIC'
+--                                        ELSE pg_get_userbyid(a.grantee) END, ','
+--                                   ORDER BY a.privilege_type, a.grantee)
+--                            FROM aclexplode(c.relacl) a), ''))
+--              FROM pg_class c
+--              WHERE c.oid = to_regclass('public.v_sales_register_gst_detail')
 
 -- DROP + CREATE rather than CREATE OR REPLACE: replacing a view cannot change
 -- a column's data type, and these expressions do change type as the derivation
@@ -92,7 +112,14 @@ WITH RECURSIVE dep AS (
     -- to_regclass, not a ::regclass cast: on a fresh database the view does
     -- not exist yet and the cast would raise instead of finding nothing.
     SELECT to_regclass('public.v_sales_register_gst_detail') AS oid, 0 AS depth
-    UNION ALL
+    -- UNION, not UNION ALL: pg_depend carries one row per referenced COLUMN,
+    -- so every edge is walked once per column and the multiplicities compound
+    -- with depth. When the COGS/RTV views took the tree to 7 levels on
+    -- 2026-09-09 this recursion had to materialise 301,214,518 rows to find
+    -- 29 dependents, blew past the role's 2min statement_timeout, and took
+    -- five sync runs red. Deduplicating on (oid, depth) collapses the
+    -- column rows and brings the same query back to 0.35s.
+    UNION
     SELECT dc.oid, dep.depth + 1
     FROM dep
     JOIN pg_depend   d  ON d.refobjid   = dep.oid
@@ -129,6 +156,14 @@ GROUP BY c.oid, n.nspname, c.relname, c.relkind, c.relowner, c.reloptions, c.rel
 
 -- A materialized view holds data, and rebuilding it from its definition would
 -- leave it empty until somebody refreshed it. Refuse rather than truncate.
+--
+-- Since 2026-09-09 there ARE matviews down this tree - mv_sales_cogs and
+-- mv_rtv_capping_ledger, both two levels below the view - so this guard now
+-- fires on any real change to the register. That is deliberate: dropping and
+-- refreshing them costs minutes and belongs in a human's hands, not in a
+-- 2-hourly cron. It does NOT fire on an unchanged file, because
+-- scripts/apply_sql.py skips this file entirely when the deployed view already
+-- matches it (see the `fingerprint:` header below).
 DO $srgd_guard$
 DECLARE
     matviews text;
@@ -139,9 +174,12 @@ BEGIN
         RAISE EXCEPTION
             'materialized view(s) depend on public.v_sales_register_gst_detail: %',
             matviews
-        USING HINT = 'Drop or detach them first - this script will not rebuild '
-                     'a matview, and recreating one empty would silently break '
-                     'whatever reads it.';
+        USING HINT = 'This script will not rebuild a matview, and recreating '
+                     'one empty would silently break whatever reads it. To '
+                     'change the register: save each matview definition, DROP '
+                     'them, apply this file, then recreate them and refill '
+                     'with public.rtv_capping_refresh() / public.cogs_refresh() '
+                     '(both also run on the o2c beat, via public.o2c_refresh()).';
     END IF;
 END
 $srgd_guard$;

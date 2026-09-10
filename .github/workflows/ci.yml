@@ -117,6 +117,39 @@ jobs:
           print(f"{len(services)} service(s) valid")
           PY
 
+      - name: Check the SQL fingerprint headers parse
+        run: |
+          python - <<'PY'
+          # A fingerprint that silently fails to parse costs no error - it just
+          # puts sql/02 back on the every-2-hours drop-and-rebuild that took
+          # five runs red on 2026-09-09. So assert the header still parses.
+          import importlib.util, pathlib, sys
+          spec = importlib.util.spec_from_file_location("a", "scripts/apply_sql.py")
+          a = importlib.util.module_from_spec(spec); spec.loader.exec_module(a)
+          problems = []
+          expect = {"02_v_sales_register_gst_detail.sql"}
+          for f in sorted(pathlib.Path("sql").glob("*.sql")):
+              sql = f.read_text(encoding="utf-8")
+              q = a.fingerprint_query(sql)
+              declared = "-- fingerprint:" in sql.lower()
+              if declared and not q:
+                  problems.append(f"{f.name}: declares a fingerprint that does not parse")
+              if q and not q.lower().lstrip().startswith("select"):
+                  problems.append(f"{f.name}: fingerprint must be a SELECT, got {q[:40]!r}")
+              if q and f.name not in expect:
+                  print(f"note: {f.name} now declares a fingerprint too")
+              if f.name in expect and not q:
+                  problems.append(f"{f.name}: fingerprint header is gone - it must not "
+                                  f"re-apply on every sync")
+              # Same digest on a CRLF and an LF checkout, or the runner and a
+              # Windows box each think the other changed the file.
+              if a.file_digest(sql) != a.file_digest(sql.replace("\n", "\r\n")):
+                  problems.append(f"{f.name}: digest is not newline-independent")
+          if problems:
+              sys.exit("fingerprint problems:\n  " + "\n  ".join(problems))
+          print("fingerprint headers ok")
+          PY
+
       - name: Fail if a secret slipped into a tracked file
         run: |
           if git ls-files --error-unmatch .env >/dev/null 2>&1; then

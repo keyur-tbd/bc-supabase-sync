@@ -785,7 +785,13 @@ Two consequences reach this repo:
   "Storage and the disk guard".
 * **Locks are shared.** `apply_sql.py` runs as one transaction and takes an
   exclusive lock on the register view and its dependents for its duration. Keep
-  it short; never add work to those files that waits on anything external.
+  it short; never add work to those files that waits on anything external. Since
+  the fingerprint skip it takes no lock at all on an unchanged run.
+* **The dependency tree is shared, and it grows.** Other repos add views on top
+  of the register (`birbal-mission-control` migrations 036/037/039 added 20 of
+  the current 29). Anything in `sql/02` that walks that tree therefore has to
+  stay cheap as it deepens, and a matview added up there changes what this
+  repo is allowed to do to its own view.
 
 ## Sales Register GST Detail
 
@@ -800,10 +806,20 @@ no date floor.
     sql/03_sales_register_indexes.sql       indexes the view's joins need
     sql/04_autovacuum_tuning.sql            per-table autovacuum thresholds
 
-`scripts/apply_sql.py` applies all three, in filename order, and runs as a step
+`scripts/apply_sql.py` applies them all, in filename order, and runs as a step
 in `bc_sync.yml` after every sync - so the deployed view always equals what is
 committed. Editing `sql/02_*.sql` and pushing is enough; there is no separate
 deploy. Every file is idempotent, so it is a no-op when nothing changed.
+
+`sql/02` is the exception to "no-op": applying it drops and rebuilds all 29
+views below the register, so it declares a **fingerprint** query in its header
+(`-- fingerprint: SELECT md5(...)` over the view's definition, reloptions and
+grants). The runner answers that query, compares it plus the file's own sha256
+against `public.etl_applied_sql`, and skips the file when both still match -
+turning a 121-second rebuild into a 2-second check. Drift is still caught, just
+checked rather than assumed: edit the file, or the deployed view, and it applies
+again. `python scripts/apply_sql.py --seed` records the current fingerprints
+without executing anything, to adopt the ledger on a database already in sync.
 
 It runs AFTER the sync because the view selects from the `bc_*` tables, which
 on a fresh database do not exist until the sync creates them. A rebuild is
@@ -834,7 +850,19 @@ Four things to know if you change the view's columns:
   dependent (it lives in whichever project owns it), then re-run.
 * A **materialized** view depending on this one is refused outright, because
   rebuilding it from its definition would leave it empty until someone
-  refreshed it. Drop it before the apply, or point it at a copy.
+  refreshed it. Since 2026-09-09 there are two - `mv_sales_cogs` and
+  `mv_rtv_capping_ledger`, both two levels down - so **any** change to the
+  view now needs them dropped first and refilled afterwards with
+  `public.cogs_refresh()` / `public.rtv_capping_refresh()`. That is why the
+  file is fingerprinted and no longer re-applies on every sync: this guard
+  would otherwise fire every two hours.
+* The dependent walk uses `UNION`, not `UNION ALL`. `pg_depend` holds one row
+  per referenced *column*, so each edge is walked once per column and the
+  multiplicities compound with depth. When the COGS/RTV views took the tree to
+  7 levels on 2026-09-09, the recursion had to materialise 301,214,518 rows to
+  find 29 dependents, exceeded the role's 2-minute `statement_timeout`, and
+  took five sync runs red before anyone looked. Deduplicating brings the same
+  query back to 0.35s. Keep the `UNION`.
 * ADDING a column does not reach Birbal on its own. Its wrapper is
   `select r.*, ...`, expanded and frozen when that view was created, so it
   keeps serving the old column list until migrations 009 + 011 of
