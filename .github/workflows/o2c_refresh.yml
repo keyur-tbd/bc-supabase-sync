@@ -4,14 +4,15 @@ name: Order-to-cash bridge refresh
 # warehouse.o2c_bridge / o2c_invoices / o2c_credit_memos / o2c_grn_lines. The views are defined in o2c/
 # and applied by hand (see o2c/README.md); this workflow only refreshes them.
 #
-# Twice a day: after the morning BC sync + the 07:00 IST GRN sheet loads, and again in the evening.
-# select public.o2c_refresh() takes 6-10 minutes; the views with a unique index refresh CONCURRENTLY, so
-# Birbal's queries are not blocked while it runs.
+# NOT SCHEDULED HERE ANY MORE (2026-09-11). The twice-daily beat runs on the database's own clock,
+# pg_cron, at 09:00 and 14:00 IST -- see o2c/pg_cron_schedule.sql. GitHub started this workflow's
+# scheduled runs 4-5 hours late every day (the 09:00 run at 13:44-13:50 IST, the 18:00 one at
+# 22:06-22:19), while a manual run starts within seconds. This workflow stays for exactly that: run it
+# by hand from the Actions tab after a GRN backfill, or to refresh between beats.
+# select public.o2c_refresh() takes 12-22 minutes; the views with a unique index refresh CONCURRENTLY,
+# so Birbal's queries are not blocked while it runs.
 
 on:
-  schedule:
-    - cron: "30 3 * * *"    # 09:00 IST
-    - cron: "30 12 * * *"   # 18:00 IST
   workflow_dispatch:
 
 concurrency:
