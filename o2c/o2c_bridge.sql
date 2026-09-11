@@ -1,6 +1,8 @@
 -- Order-to-Cash bridge: PO -> Invoice -> Credit Memo -> GRN, for Birbal.
 -- Materialised views (no pg_cron on this project): call select public.o2c_refresh() after the BC sync and the GRN loaders run.
 -- Window: posted sales invoices from FY27 (posting date >= 2026-04-01), which is also where bc_posted_sales_invoice_lines begins.
+-- Credit memos are dated and windowed by their DOCUMENT date, the same basis as effective_date in the sales register
+-- (MIS, net sales, COGS, P&L); the ledger posting date is kept alongside only for G/L reconciliation.
 
 drop materialized view if exists public.o2c_bridge cascade;
 drop materialized view if exists public.o2c_credit_memos cascade;
@@ -194,15 +196,19 @@ create index on public.o2c_grn_matched (invoice_no, erp_item_no);
 create index on public.o2c_grn_matched (feed, grn_row_id);
 
 -- ------------------------------------------------------------------ 5. credit memos, FY27, categorised and linked to an invoice
+-- credit_memo_date is the memo's DOCUMENT date (2026-09-11): the sales register attributes every memo by it
+-- (effective_date), so the O2C side must too or the two disagree on the month of 742 memos / Rs 4.09 cr.
+-- The FY27 window is on the same date; the 389 memos it drops (posted FY27, document-dated FY26) link to no FY27 invoice.
 create materialized view public.o2c_credit_memos as
 with c as (
-    select cm."No" as credit_memo_no, cm."Sell_to_Customer_No" as customer_no, cm."Sell_to_Customer_Name" as customer_name, cm."Posting_Date" as credit_memo_date,
+    select cm."No" as credit_memo_no, cm."Sell_to_Customer_No" as customer_no, cm."Sell_to_Customer_Name" as customer_name,
+           coalesce(cm."Document_Date", cm."Posting_Date") as credit_memo_date,
            coalesce(cm."AmountToCustomer", 0) as credit_memo_amount, nullif(cm."Sales_Return_Reason_Code", '') as reason_code,
            coalesce(cm."Corrective", false) or coalesce(cm."Correction", false) as is_cancellation,
            nullif(cm."Applies_to_Doc_No", '') as applies_to_doc_no, cm."Applies_to_Doc_Type" as applies_to_doc_type,
            nullif(cm."External_Document_No", '') as external_document_no, nullif(cm."PRN_Document_No", '') as prn_document_no, cm."PRN_Document_Date" as prn_document_date,
-           cm."Location_Code" as warehouse_code
-    from public.bc_posted_sales_credit_memo cm where cm."Posting_Date" >= date '2026-04-01'
+           cm."Location_Code" as warehouse_code, cm."Posting_Date" as ledger_posting_date
+    from public.bc_posted_sales_credit_memo cm where coalesce(cm."Document_Date", cm."Posting_Date") >= date '2026-04-01'
 )
 select c.*,
        case when c.is_cancellation then 'INVOICE_CANCELLATION'
