@@ -344,6 +344,19 @@ begin
     exception when others then
         raise warning 'feed_inventory refresh failed: %', sqlerrm;
     end;
+    -- Birbal migration 076 (2026-09-12): the credit notes BC withdrew with a debit note,
+    -- and those debit notes, are paired line for line into public.register_reversal_lines
+    -- and left out of warehouse.v_sales_register_gst_detail. Everything below reads that
+    -- view, so the pairs are rebuilt FIRST (~10s); a stale table only means a withdrawn
+    -- note counts until the next beat, never a wrong pair.
+    begin
+        perform public.register_reversals_refresh();
+    exception
+        when undefined_function then
+            raise warning 'register_reversals_refresh() not present (Birbal migration 076 not applied); skipped';
+        when others then
+            raise warning 'register_reversals_refresh failed: %', sqlerrm;
+    end;
     -- Birbal migration 036 (2026-09-09): the returns-capping ledger (mv_rtv_capping_ledger)
     -- is built off the same GST register, and until now it was on no beat at all -- it only
     -- moved when someone ran it by hand, so the provision Birbal quotes could be weeks
