@@ -203,7 +203,7 @@ Storage-related settings (all optional, shown with the values in use):
 | Variable | Value | Meaning |
 |---|---|---|
 | `SUPABASE_RAW_JSON_EXCLUDE_TABLES` | `*` | never create/populate `_raw_json` (`*` = every table; or a comma list) |
-| `SUPABASE_DISK_LIMIT_GB` | `18` | the project's disk size, as shown under *Settings → Compute and Disk* |
+| `SUPABASE_DISK_LIMIT_GB` | `75` | the project's disk size, as shown under *Settings → Compute and Disk* |
 | `SUPABASE_DISK_STOP_PCT` | `85` | refuse to write above this percentage of the limit |
 | `BC_MAXPAGESIZE` | `5000` | default rows per BC page; per-service `max_page_size` overrides it (see *Page size*) |
 
@@ -266,7 +266,7 @@ touches the repo). Add these as **Settings → Secrets and variables →
 Actions**: `BC_CLIENT_ID`, `BC_CLIENT_SECRET`, `BC_TENANT_ID`,
 `BC_ENVIRONMENT`, `BC_COMPANY_ID`, `SUPABASE_DB_URL`. The repo
 **variables** `SUPABASE_RAW_JSON_EXCLUDE_TABLES`, `SUPABASE_DISK_LIMIT_GB`
-and `SUPABASE_DISK_STOP_PCT` override the workflow defaults (`*`, `18`,
+and `SUPABASE_DISK_STOP_PCT` override the workflow defaults (`*`, `75`,
 `85`). Trigger an ad hoc full sync from the Actions tab via "Run workflow"
 → mode `full`.
 
@@ -592,7 +592,7 @@ Rules that came out of it:
     FULL`, `CLUSTER`) without room for a full copy of that table, and do it
     one table at a time, smallest first. Prefer forward fixes in the sync
     (the BIGINT → NUMERIC widening above) over rewriting history.
--   The disk guard (`SUPABASE_DISK_LIMIT_GB` (50 GB) / `SUPABASE_DISK_STOP_PCT` (85%)) is
+-   The disk guard (`SUPABASE_DISK_LIMIT_GB` (75 GB) / `SUPABASE_DISK_STOP_PCT` (85%)) is
     the backstop; keep it configured and update the limit when the disk
     changes.
 

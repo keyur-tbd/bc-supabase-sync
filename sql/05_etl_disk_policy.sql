@@ -18,7 +18,8 @@
 -- is over the ceiling. So the pipeline actually causing the problem is the one
 -- that halts, while the others keep running.
 --
--- Budgets sum to exactly the global stop threshold (42.5 GB of 50), so the two
+-- Budgets start below the global stop threshold (63.75 GB of 75); etl_disk_autobudget()
+-- (sql/06) hands the rest to pipelines as they grow, so the two
 -- checks agree rather than contradicting each other.
 
 CREATE TABLE IF NOT EXISTS public.etl_disk_policy (
@@ -33,7 +34,7 @@ CREATE TABLE IF NOT EXISTS public.etl_disk_policy (
 );
 
 INSERT INTO public.etl_disk_policy (pipeline, table_pattern, budget_gb, stop_pct, warn_pct, note) VALUES
-    ('_disk', '{}', 50, 85, 70,
+    ('_disk', '{}', 75, 85, 70,
      'The volume itself. budget_gb = provisioned size; stop at 85%, warn at 70%. Update budget_gb when the volume is resized.'),
     ('bc_sync', '{^bc_,^ref_gst_state$,^etl_}', 12, 100, 80,
      'bc-supabase-sync. 5.85 GB used at 2026-09-02.'),
