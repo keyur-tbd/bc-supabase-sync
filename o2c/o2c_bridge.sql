@@ -73,8 +73,22 @@ with raw as (
     select 'milkbasket_grn', g.id, 'Milkbasket', array['C00035'], g.po_number, g.vendor_invoice_number, g.grn_number, g.grn_date, g.article::text, 'Milkbasket', g.accepted_qty, g.received_qty, null, null, g.source_file
     from public.milkbasket_grn g
     union all
-    select 'reliance_grn', g.id, 'Milkbasket', array['C00035'], g.po_number, g.vendor_invoice_number, g.grn_number, g.grn_date, null, null, null, null, null, null, g.source_file
+    -- Reliance's GRN PDFs carry every line in raw_data (article, challan / received / accepted qty), item-level since
+    -- 2026-09-23. Metro Cash & Carry (Reliance-owned) arrives in the same feed, told apart by its shipping address, and
+    -- uses the same article catalogue, so both map through the Milkbasket item map.
+    select 'reliance_grn', g.id,
+           case when g.shipping_address ilike '%metro%' then 'Metro' else 'Reliance' end,
+           case when g.shipping_address ilike '%metro%' then array['C00356'] else array['C00035'] end,
+           g.po_number, g.vendor_invoice_number, g.grn_number, g.grn_date,
+           g.raw_data->>'article', 'Milkbasket', (g.raw_data->>'accepted_qty')::numeric, (g.raw_data->>'challan_qty')::numeric,
+           nullif(greatest((g.raw_data->>'challan_qty')::numeric - (g.raw_data->>'accepted_qty')::numeric, 0), 0), null, g.source_file
     from public.reliance_grn g
+    -- a GRN the Milkbasket loader also picked up (the same GRN number, or the same invoice under another GRN number)
+    -- stays with milkbasket_grn: counted twice it doubled the receipt of 308 lines. A GRN from before FY27, or quoting an
+    -- FY26 invoice (26BLR-06421), is left out: the 5-digit-core match ignores the year and pinned last year's receipts on
+    -- this year's 27BLR-06421 (header-only it was harmless; with quantities it doubled the receipt).
+    where not exists (select 1 from public.milkbasket_grn mb where mb.grn_number = g.grn_number or mb.vendor_invoice_number = g.vendor_invoice_number)
+      and g.grn_date >= date '2026-04-01' and coalesce(g.vendor_invoice_number, '') !~ '^26'
     union all
     select 'nb_grn', g.id, 'Nature''s Basket', array['C00026'], g.po_no, g.invoice_no, g.grn_no, g.grn_date, g.article_code::text, 'Nature''s Basket', g.accepted_quantity, g.received_quantity, g.rejected_quantity, null, g.source_file
     from public.nb_grn g
