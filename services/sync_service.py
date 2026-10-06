@@ -30,6 +30,7 @@ of 2031 — can never poison it and freeze the sync.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 
 from config import BCConfig, SupabaseConfig, load_web_services
@@ -61,9 +62,23 @@ def _utc_now() -> datetime:
 GAP_SWEEP_LIMIT = 200
 
 
+# Open-entry refresh (refresh_open_field): how often, how many keys per OR
+# filter (keeps the URL near 2 KB), and how many closed-elsewhere keys one run
+# re-reads.
+DEFAULT_OPEN_REFRESH_HOURS = 12
+OPEN_REFRESH_BATCH = 80
+OPEN_REFRESH_KEY_LIMIT = 8000
+
+
 def _odata_str(value: str) -> str:
     """Single-quoted OData string literal; an embedded quote is doubled."""
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def _odata_key(value: str) -> str:
+    """A key stored as text, back as an OData literal: bare when it is an
+    integer (Entry_No), quoted otherwise."""
+    return value if re.fullmatch(r"-?\d+", value) else _odata_str(value)
 
 
 def _parse_date(s: str) -> date:
@@ -182,6 +197,16 @@ class SyncService:
                     quarantine_invalid=quarantine_invalid,
                 )
 
+            open_refreshed = False
+            if strategy == "date" and self._open_refresh_due(service, state, mode):
+                p, f = self._refresh_open_entries(
+                    service, stats, name, table_name, primary_key,
+                    quarantine_invalid=quarantine_invalid,
+                )
+                processed += p
+                failed += f
+                open_refreshed = True
+
             status = "success" if failed == 0 else "partial_failure"
             self._db.mark_run_completed(name, status=status, records_processed=processed, records_failed=failed)
             # Establish/advance the incremental watermark only on a clean,
@@ -189,6 +214,8 @@ class SyncService:
             # value pulled from the data.
             if status == "success":
                 self._db.set_incremental_watermark(name, _utc_now())
+                if open_refreshed:
+                    self._db.set_open_refreshed(name, _utc_now())
             stats.mark_finished(status=status)
 
         except NonRetryableError as exc:
@@ -301,6 +328,85 @@ class SyncService:
                 self._db.save_resume_point(name, next_url, total_processed)
 
         return total_processed, total_failed
+
+    def _open_refresh_due(self, service, state, mode) -> bool:
+        if not service.get("refresh_open_field"):
+            return False
+        if mode == "full" or state.open_refreshed_at is None:
+            return True
+        last = state.open_refreshed_at
+        if last.tzinfo is not None:
+            last = last.astimezone(timezone.utc).replace(tzinfo=None)
+        every = timedelta(hours=float(service.get("refresh_open_every_hours", DEFAULT_OPEN_REFRESH_HOURS)))
+        return _utc_now() - last >= every
+
+    def _refresh_open_entries(
+        self, service, stats, name, table_name, primary_key, quarantine_invalid: bool = True,
+    ) -> tuple[int, int]:
+        """Re-read every entry BC holds open, then every entry held open here that BC no longer does.
+
+        A ledger entry changes after posting without any date moving: a part
+        payment lowers an old invoice's Remaining_Amount and leaves it open,
+        and Closed_at_Date only moves when the entry closes. The page has no
+        modified timestamp, so the posting-date lookback and the
+        Closed_at_Date pass cannot see those changes. On 2026-10-06 the open
+        set here matched BC's to within 0.5% of entries, but the remaining
+        amounts on them ran Rs 2.5 cr above BC's, which is what made
+        Birbal's ledger_lag. Only open entries can carry a stale balance, so
+        re-reading them is enough to make the copy exact.
+
+        The upsert skips unchanged rows, so the pass writes only what moved.
+        """
+        field = service["refresh_open_field"]
+        held_open = self._db.keys_where_true(table_name, field, primary_key)
+        seen: set[str] = set()
+        total_p = total_f = 0
+        logger.info(f"[{name}] Open refresh: re-reading every entry with {field} eq true "
+                    f"({len(held_open)} held open here).")
+        for records, _next_url in self._api.fetch_pages(name, odata_filter=f"{field} eq true"):
+            p, f = self._process_page(name, table_name, primary_key, None, records, stats,
+                                      quarantine_invalid=quarantine_invalid)
+            total_p += p
+            total_f += f
+            seen.update(str(r.get(primary_key)) for r in records)
+
+        if not seen and held_open:
+            # BC returning nothing while thousands are open here means the
+            # filter broke, not that every customer paid up; re-reading each
+            # key would be thousands of requests to learn nothing.
+            logger.warning(f"[{name}] Open refresh: BC returned no open entries; "
+                           f"skipping the per-entry re-read of {len(held_open)}.")
+            return total_p, total_f
+
+        # Held open here, not open in BC: closed since, by an application the
+        # date passes missed (an old receipt applied to an old invoice closes
+        # it with an old Closed_at_Date). Fetch each by key; an OR list on one
+        # field is accepted where an OR across fields is not.
+        closed = sorted(held_open - seen)
+        if len(closed) > OPEN_REFRESH_KEY_LIMIT:
+            logger.warning(f"[{name}] Open refresh: {len(closed)} entries closed in BC; "
+                           f"re-reading the first {OPEN_REFRESH_KEY_LIMIT}, the rest next time.")
+            closed = closed[:OPEN_REFRESH_KEY_LIMIT]
+        if closed:
+            logger.info(f"[{name}] Open refresh: {len(closed)} entries held open here are not open "
+                        f"in BC; re-reading each.")
+        returned: set[str] = set()
+        for i in range(0, len(closed), OPEN_REFRESH_BATCH):
+            batch = closed[i:i + OPEN_REFRESH_BATCH]
+            odata_filter = " or ".join(f"{primary_key} eq {_odata_key(k)}" for k in batch)
+            for records, _next_url in self._api.fetch_pages(name, odata_filter=odata_filter):
+                p, f = self._process_page(name, table_name, primary_key, None, records, stats,
+                                          quarantine_invalid=quarantine_invalid)
+                total_p += p
+                total_f += f
+                returned.update(str(r.get(primary_key)) for r in records)
+        gone = [k for k in closed if k not in returned]
+        if gone:
+            # Left in place: nothing else in this sync deletes, and a ledger
+            # entry is never deleted in BC, so this wants a person to look.
+            logger.warning(f"[{name}] Open refresh: {len(gone)} entries held open here were not "
+                           f"returned by BC at all: {', '.join(gone[:10])}{' ...' if len(gone) > 10 else ''}")
+        return total_p, total_f
 
     def _run_series_key(
         self, service, state, stats, name, table_name, primary_key, mode,

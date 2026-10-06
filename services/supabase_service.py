@@ -243,6 +243,14 @@ class SupabaseService:
                     text(f"ALTER TABLE {self._sync_state_table()} ADD COLUMN IF NOT EXISTS history_through DATE NULL")
                 )
             self._known_columns.pop(SYNC_STATE_TABLE, None)
+            existing = self._existing_columns(SYNC_STATE_TABLE)
+        if "open_refreshed_at" not in existing:
+            logger.info("Adding open_refreshed_at column to etl_sync_state (migration).")
+            with self._engine.begin() as conn:
+                conn.execute(
+                    text(f"ALTER TABLE {self._sync_state_table()} ADD COLUMN IF NOT EXISTS open_refreshed_at TIMESTAMPTZ NULL")
+                )
+            self._known_columns.pop(SYNC_STATE_TABLE, None)
 
         self._enable_rls(SYNC_STATE_TABLE)
 
@@ -658,6 +666,24 @@ class SupabaseService:
         with self._engine.connect() as conn:
             return [r[0] for r in conn.execute(sql, params).fetchall()]
 
+    def keys_where_true(self, table_name: str, flag_column: str, key_column: str) -> set[str]:
+        """Every key whose boolean flag_column is true, as text.
+
+        Used by the open-entry refresh: the entries this copy still holds open
+        are the only ones that can be stale, so they are the set to check
+        against what BC says is open today.
+        """
+        fcol = normalize_column_name(flag_column)
+        kcol = normalize_column_name(key_column)
+        if fcol not in self._existing_columns(table_name):
+            return set()
+        sql = text(
+            f"SELECT {quote_ident(kcol)}::text FROM {qualified_table(self._schema, table_name)} "
+            f"WHERE {quote_ident(fcol)} IS TRUE"
+        )
+        with self._engine.connect() as conn:
+            return {r[0] for r in conn.execute(sql).fetchall()}
+
     # ---------- upserts ----------
 
     def upsert_rows(
@@ -891,6 +917,13 @@ class SupabaseService:
         )
         with self._engine.begin() as conn:
             conn.execute(sql, {"ts": watermark, "name": service_name})
+
+    def set_open_refreshed(self, service_name: str, ts: datetime) -> None:
+        sql = text(
+            f"UPDATE {self._sync_state_table()} SET open_refreshed_at = :ts WHERE service_name = :name"
+        )
+        with self._engine.begin() as conn:
+            conn.execute(sql, {"ts": ts, "name": service_name})
 
     def mark_run_completed(
         self,

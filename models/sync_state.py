@@ -20,6 +20,9 @@ back-filled by Posting_Date but kept current by SystemCreatedAt):
 
 resume_url is the intra-window pagination link (BC @odata.nextLink) for
 page-level resume within whichever window/filter was in flight.
+
+open_refreshed_at is when the service last re-read every entry BC holds open
+(services with refresh_open_field only; see SyncService._refresh_open_entries).
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ class SyncState:
     records_processed: int = 0
     records_failed: int = 0
     last_error: str | None = None
+    open_refreshed_at: datetime | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any] | None, service_name: str) -> "SyncState":
@@ -53,6 +57,7 @@ class SyncState:
             records_processed=row.get("records_processed", 0) or 0,
             records_failed=row.get("records_failed", 0) or 0,
             last_error=row.get("last_error"),
+            open_refreshed_at=row.get("open_refreshed_at"),
         )
 
     @property

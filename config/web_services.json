@@ -1,5 +1,5 @@
 {
-  "_comment": "Per-service sync config. URLs built at runtime from .env. STRATEGY (sync_strategy): 'date' (default) = chunk historical backfill on history_field and run incremental on incremental_field — use when the table has a usable date; 'full_refresh' = re-pull the WHOLE table every run and upsert — use when the table has NO timestamp and no monotonic key (reference/lines tables); see _new_table_templates below. PRIMARY KEY (primary_key) may be a single name OR a list for a composite key — lines/detail tables MUST use a composite key (e.g. [Document_No, Line_No]) because the document number repeats across line rows. incremental_is_datetime=true if incremental_field is a datetime (e.g. SystemCreatedAt). lookback_days = trailing re-scan buffer for date incremental. API (api): 'odata' (default) = legacy ODataV4 web service published from a BC page; 'v2.0' = standard Business Central API v2.0 entity set (what Power BI's BC connector reads) - name is the camelCase entitySet (e.g. customers), primary_key is 'id', incremental on lastModifiedDateTime with incremental_is_datetime=true. incremental_extra_fields = additional date fields each re-scanned in their own pass with the same floor (BC refuses OR across distinct fields), for ledgers whose rows change after posting.",
+  "_comment": "Per-service sync config. URLs built at runtime from .env. STRATEGY (sync_strategy): 'date' (default) = chunk historical backfill on history_field and run incremental on incremental_field — use when the table has a usable date; 'full_refresh' = re-pull the WHOLE table every run and upsert — use when the table has NO timestamp and no monotonic key (reference/lines tables); see _new_table_templates below. PRIMARY KEY (primary_key) may be a single name OR a list for a composite key — lines/detail tables MUST use a composite key (e.g. [Document_No, Line_No]) because the document number repeats across line rows. incremental_is_datetime=true if incremental_field is a datetime (e.g. SystemCreatedAt). lookback_days = trailing re-scan buffer for date incremental. API (api): 'odata' (default) = legacy ODataV4 web service published from a BC page; 'v2.0' = standard Business Central API v2.0 entity set (what Power BI's BC connector reads) - name is the camelCase entitySet (e.g. customers), primary_key is 'id', incremental on lastModifiedDateTime with incremental_is_datetime=true. incremental_extra_fields = additional date fields each re-scanned in their own pass with the same floor (BC refuses OR across distinct fields), for ledgers whose rows change after posting. refresh_open_field = a boolean field (Open) whose true rows are all re-read every refresh_open_every_hours (default 12), plus each row held true here that BC no longer returns as true: for ledgers whose open entries change (part applications) with no date moving.",
   "_new_table_templates": {
     "table_with_a_date": {
       "name": "Some_Header_Page_Excel",
@@ -225,7 +225,7 @@
       "enabled": true
     },
     {
-      "_NOTE": "Customer Ledger Entries (page 25). ~308k rows, all from 2024-04-01 onwards. Entries are MUTABLE after posting: Open / Remaining_Amount / Closed_at_Date change when a payment is applied. No SystemCreatedAt/ModifiedAt on this page, so incremental runs a Posting_Date lookback (new/back-dated postings) plus an extra pass on Closed_at_Date (old invoices that just got closed). Partial applications that leave an old entry open are only refreshed by a --mode full run.",
+      "_NOTE": "Customer Ledger Entries (page 25). ~322k rows, all from 2024-04-01 onwards. Entries are MUTABLE after posting: Open / Remaining_Amount / Closed_at_Date change when a payment is applied. No SystemCreatedAt/ModifiedAt on this page, so incremental runs a Posting_Date lookback (new/back-dated postings) plus an extra pass on Closed_at_Date (old invoices that just got closed). A part application changes an old entry without moving any date, so refresh_open_field re-reads every entry BC holds open (~39k, ~10 min) every refresh_open_every_hours, then each entry held open here that BC no longer has open. Before it (2026-10-06) remaining amounts on open entries ran Rs 2.5 cr above BC.",
       "name": "Customer_Ledger_Entries_Excel",
       "display_name": "Customer Ledger Entries",
       "object_type": "Page",
@@ -241,6 +241,8 @@
       ],
       "chunk": "monthly",
       "lookback_days": 30,
+      "refresh_open_field": "Open",
+      "refresh_open_every_hours": 12,
       "sync_start_date": "2024-04-01",
       "enabled": true
     },
@@ -269,7 +271,7 @@
       "max_page_size": 10000
     },
     {
-      "_NOTE": "Vendor Ledger Entries (page 29). ~36k rows, all from 2024-04-01 onwards. Same shape as Customer_Ledger_Entries_Excel: mutable after posting (Open / Remaining_Amount / Closed_at_Date), no SystemCreatedAt -> Posting_Date lookback plus an extra pass on Closed_at_Date.",
+      "_NOTE": "Vendor Ledger Entries (page 29). ~36k rows, all from 2024-04-01 onwards. Same shape as Customer_Ledger_Entries_Excel: mutable after posting (Open / Remaining_Amount / Closed_at_Date), no SystemCreatedAt -> Posting_Date lookback plus an extra pass on Closed_at_Date. Open entries re-read the same way (refresh_open_field; ~1.3k open, ~20 s).",
       "name": "Vendor_Ledger_Entries_Excel",
       "display_name": "Vendor Ledger Entries",
       "object_type": "Page",
@@ -285,6 +287,8 @@
       ],
       "chunk": "monthly",
       "lookback_days": 30,
+      "refresh_open_field": "Open",
+      "refresh_open_every_hours": 12,
       "sync_start_date": "2024-04-01",
       "enabled": true
     },

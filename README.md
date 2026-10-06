@@ -22,12 +22,12 @@ BC):
 | `Ship_to_Address_Excel` (**disabled** – 404, web service not published) | `bc_ship_to_address` | full_refresh | — | — |
 | `Requests_to_Approve_Excel` | `bc_request_to_approve` | full_refresh | — | — |
 | `Chart_of_Account` (page 16; the BC service name is singular) | `bc_chart_of_accounts` | full_refresh | — | — |
-| `Customer_Ledger_Entries_Excel` | `bc_customer_ledger_entries` | date | `Posting_Date` | `Posting_Date` + extra pass on `Closed_at_Date` |
+| `Customer_Ledger_Entries_Excel` | `bc_customer_ledger_entries` | date | `Posting_Date` | `Posting_Date` + extra pass on `Closed_at_Date` + open entries re-read every 12 h (`refresh_open_field`) |
 | `G_L_Account_Card_Excel` | `bc_gl_account_card` | full_refresh | — | — |
 | `customers` (**API v2.0**) | `bc_api_customers` | full_refresh | — | — |
 | `items` (**API v2.0**) | `bc_api_items` | full_refresh | — | — |
 | `vendors` (**API v2.0**) | `bc_api_vendors` | full_refresh | — | — |
-| `Vendor_Ledger_Entries_Excel` | `bc_vendor_ledger_entries` | date | `Posting_Date` | `Posting_Date` + extra pass on `Closed_at_Date` |
+| `Vendor_Ledger_Entries_Excel` | `bc_vendor_ledger_entries` | date | `Posting_Date` | `Posting_Date` + extra pass on `Closed_at_Date` + open entries re-read every 12 h (`refresh_open_field`) |
 | `Sales_Price_Lists_Excels` (Sales Price List card, page 7000) | `bc_sales_price_lists` | full_refresh | — | — |
 | `Sales_Price_Lists_ExcelsLines` (its lines subpage — the customer price list) | `bc_sales_price_list_lines` | full_refresh | — | — |
 | `Posted_Sales_Invoice_ExcelSalesInvLines` (FY 2026-27 series only) | `bc_posted_sales_invoice_lines` | series_key | — | `Document_No` |
