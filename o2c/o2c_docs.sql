@@ -34,3 +34,23 @@ platform is resolved at ship-to level (channel_map_locations): Reliance Retail's
 
 Columns: po_number, po_number_raw, po_suffixed, platform, customer_no, customer_name, customer_search_name, po_invoice_pattern, ship_to_code, ship_to_name, warehouse_code, so_no, invoice_no, invoice_date, invoice_status, cancellation_cm_no, replacement_invoice_no, replaces_invoice_no, item_lines, po_qty, invoiced_qty, invoiced_value, grn_feed, grn_nos, grn_date, grn_qty, short_qty, excess_qty, short_value, lines_not_in_grn, grn_coverage, shgrn_cm_nos, shgrn_cm_qty, shgrn_cm_value, credit_status
 platform is resolved at ship-to level (channel_map_locations): Reliance Retail's RRL MILK BASKET locations appear as Milkbasket, its stores and DCs as Reliance. Group by platform and both come out as separate rows.$doc$);
+
+-- Birbal migrations append to these docs in place; the delete + insert above wipes those appends, so they are
+-- re-applied after the insert above (each guarded, so a second run adds nothing).
+-- 035 (2026-09-09): INC credit memo = cancelled
+update warehouse.warehouse_meta
+set doc_md = doc_md
+  || E'\n\nCANCELLED means either of two things, and both are excluded from the _live views: BC''s own Cancel/Correct action (invoice header flag, corrective memo, cancellation_kind = ''BC_CANCELLED'', 201 invoices FY27) OR a credit memo posted against the invoice with return reason code INC (cancellation_kind = ''INC_MEMO'', 721 invoices, 485,891 units, Rs 2.17 crore). The second kind carries no BC flag at all -- the accounts team credits the invoice with reason INC instead of using the Correct action -- so it looked LIVE until migration 035. Some were re-issued under the same PO (replacement_invoice_no set) and some were simply credited in full and never re-billed; both are cancelled. cancellation_memo_no names the memo. A cancelled line always carries grn_coverage = ''CANCELLED_INVOICE'', credit_status = ''INVOICE_CANCELLED'' and NULL short_qty / excess_qty / short_value, whichever kind it is.'
+where table_name in ('o2c_bridge', 'o2c_invoices', 'o2c_bridge_live', 'o2c_invoices_live')
+  and doc_md not like '%CANCELLED means either of two things%';
+-- 169 (2026-10-13): cancelled invoice -> re-invoice link, GRN moved to the re-invoice
+update warehouse.warehouse_meta
+set doc_md = doc_md
+  || E'\n\nRE-INVOICES (migration 169): a cancelled invoice and the live invoice raised against the same PO in its place are linked by warehouse.o2c_invoice_replacements. replacement_invoice_no is set on the CANCELLED invoice (the live re-invoice) and replaces_invoice_no on the LIVE re-invoice (every cancelled invoice it replaced); both are NULL elsewhere. A re-invoice carries the cancelled invoice''s po_number when the suffix made them differ (4549479352A -> 4549479352, po_suffixed = true), so it joins its PO line. A GRN the partner booked against the cancelled invoice is MOVED to the re-invoice''s line for the same item (when that line has no GRN of its own): grn_carried_from names the cancelled invoice on the re-invoice''s line, grn_moved_to names the re-invoice on the cancelled line, whose GRN columns are then NULL -- a receipt is on one line only. So a re-invoice is never "GRN pending" or "not in GRN" just because the receipt was booked against the invoice it replaced.'
+where table_name in ('o2c_bridge', 'o2c_invoices', 'o2c_bridge_live', 'o2c_invoices_live')
+  and doc_md not like '%RE-INVOICES (migration 169)%';
+update warehouse.warehouse_meta
+set doc_md = doc_md
+  || E'\n\neffective_invoice_no (migration 169): the invoice this GRN row counts against in o2c_bridge -- invoice_no, except where the feed matched a CANCELLED invoice that was re-invoiced, in which case the receipt moved to the live re-invoice (see o2c_invoice_replacements).'
+where table_name = 'o2c_grn_lines'
+  and doc_md not like '%effective_invoice_no (migration 169)%';

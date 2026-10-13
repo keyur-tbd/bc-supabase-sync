@@ -412,44 +412,250 @@ end $$;
 -- line looks the same whichever way it was cancelled, and cancellation_kind /
 -- cancellation_memo_no say which. Keep this too; a plain wrapper puts Rs 2.17 crore
 -- of reversed billing back into every fill rate and pending list.
+-- Birbal migration 169 (2026-10-13): a cancelled invoice is linked to the LIVE invoice raised
+-- against the same PO in its place (warehouse.o2c_invoice_replacements, both cancellation kinds,
+-- PO suffixes, open-PO customers only on ship-to + 3 days + 80% of the quantities). The bridge
+-- sets replacement_invoice_no / replaces_invoice_no from it, gives a re-invoice the cancelled
+-- invoice's po_number, and MOVES a GRN booked against the cancelled invoice to the re-invoice's
+-- line (grn_carried_from / grn_moved_to). Keep this too: without it 33k units of received goods
+-- read as 'not in GRN' on the re-invoices.
+create or replace view warehouse.o2c_invoice_replacements as
+with inc as (
+  select cm.invoice_no,
+         string_agg(distinct cm.credit_memo_no, ', ' order by cm.credit_memo_no) as inc_cm_nos
+    from public.o2c_credit_memos cm
+   where coalesce(cm.reason_code, '') = 'INC' and cm.invoice_no is not null
+   group by cm.invoice_no
+),
+h as materialized (
+  select h.invoice_no, h.invoice_date, h.customer_no, h.customer_name, h.ship_to_code,
+         coalesce(cl.platform, h.platform) as platform,
+         h.po_invoice_pattern, h.po_number, h.po_number_raw, k.po_key,
+         case when h.cancelled then 'BC_CANCELLED' when inc.invoice_no is not null then 'INC_MEMO' end as cancellation_kind,
+         coalesce(h.cancellation_cm_no, inc.inc_cm_nos) as cancellation_memo_no
+    from public.o2c_invoice_hdr h
+    cross join lateral (select upper(regexp_replace(coalesce(h.po_number_raw, ''), '[^A-Za-z0-9]', '', 'g')) as po_key) k
+    left join inc on inc.invoice_no = h.invoice_no
+    left join warehouse.channel_map_locations cl on cl.customer_no = h.customer_no and cl.ship_to_code = h.ship_to_code
+),
+c as materialized (
+  -- a PO of at least 5 letters/digits with a digit in it: 'SERENITY SAMPLE' and the like are not POs
+  select * from h where cancellation_kind is not null and length(po_key) >= 5 and po_key ~ '[0-9]'
+),
+live as materialized (
+  select h.*, left(h.po_key, -1) as po_key_less1, left(h.po_key, -2) as po_key_less2
+    from h where cancellation_kind is null
+),
+-- a later LIVE invoice of the same customer on the same PO: the same letters and digits, or the PO
+-- plus the short suffix (A, -A, A1, -1) the ERP's duplicate-PO check forced on the re-invoice.
+-- Three equality joins rather than one OR, so each is a hash join (one OR'd join took 12 s).
+cand as (
+  select c.invoice_no as c_inv, l.invoice_no as l_inv, l.invoice_date as l_date,
+         case when l.po_key = c.po_key then 'SAME_PO' else 'PO_WITH_SUFFIX' end as link_rule,
+         (c.po_invoice_pattern = 'ONE_PO_ONE_INVOICE') as one_po,
+         (l.ship_to_code is not distinct from c.ship_to_code and l.invoice_date <= c.invoice_date + 3) as near_same_ship_to
+    from c
+    join (select l.invoice_no, l.invoice_date, l.customer_no, l.ship_to_code, l.po_key, l.po_number_raw, l.po_key as k from live l
+          union all
+          select l.invoice_no, l.invoice_date, l.customer_no, l.ship_to_code, l.po_key, l.po_number_raw, l.po_key_less1 from live l
+           where right(l.po_key, 1) ~ '[A-Z0-9]'
+          union all
+          select l.invoice_no, l.invoice_date, l.customer_no, l.ship_to_code, l.po_key, l.po_number_raw, l.po_key_less2 from live l
+           where right(l.po_key, 2) ~ '^[A-Z][0-9]$') l
+      on l.customer_no = c.customer_no and l.k = c.po_key
+   where (l.invoice_date, l.invoice_no) > (c.invoice_date, c.invoice_no)
+     and l.invoice_date <= c.invoice_date + 90
+     and (l.po_key = c.po_key
+          -- a suffix must FOLLOW the PO as written (a letter, or a separator then a digit), never
+          -- extend a number: 45485549561 is another PO, 4548554956-1 is this one again
+          or l.po_number_raw ~ ('^' || regexp_replace(c.po_number, '([^A-Za-z0-9])', '\\\1', 'g')
+                                || '([^A-Za-z0-9]*[A-Za-z][0-9]?|[^A-Za-z0-9]+[0-9])[^A-Za-z0-9]*$'))
+),
+sim as (
+  select p.c_inv, p.l_inv,
+         count(*) filter (where u.a_item is not null and u.b_item is not null) as items_common,
+         sum(least(coalesce(u.a_qty, 0), coalesce(u.b_qty, 0)))
+           / nullif(sum(greatest(coalesce(u.a_qty, 0), coalesce(u.b_qty, 0))), 0) as qty_similarity
+    from cand p
+    cross join lateral (
+      select a.erp_item_no as a_item, a.invoiced_qty as a_qty, b.erp_item_no as b_item, b.invoiced_qty as b_qty
+        from (select erp_item_no, invoiced_qty from public.o2c_invoice_lines where invoice_no = p.c_inv) a
+        full join (select erp_item_no, invoiced_qty from public.o2c_invoice_lines where invoice_no = p.l_inv) b
+          on b.erp_item_no = a.erp_item_no
+    ) u
+   group by p.c_inv, p.l_inv
+),
+best as (
+  -- one PO, one invoice: the first later invoice on the PO is the re-invoice (it may bill a different
+  -- item or quantity -- that is often why the first one was cancelled). Open-PO customers bill one PO
+  -- every few days, so there it must go to the same ship-to within 3 days and carry >= 80% of the
+  -- cancelled quantities; the closest match wins.
+  select distinct on (p.c_inv) p.c_inv, p.l_inv, p.l_date, p.link_rule, s.items_common, s.qty_similarity
+    from cand p
+    left join sim s on s.c_inv = p.c_inv and s.l_inv = p.l_inv
+   where p.one_po or (p.near_same_ship_to and s.qty_similarity >= 0.8)
+   order by p.c_inv, case when p.one_po then 0 else -s.qty_similarity end, p.l_date, p.l_inv
+)
+select x.invoice_no as cancelled_invoice_no, x.invoice_date as cancelled_invoice_date,
+       x.cancellation_kind, x.cancellation_memo_no,
+       x.customer_no, x.customer_name, x.platform, x.ship_to_code, x.po_invoice_pattern,
+       x.po_number, x.po_number_raw,
+       ct.items as cancelled_items, ct.qty as cancelled_qty, ct.value as cancelled_value,
+       case when b.l_inv is null then 'NOT_REINVOICED' else 'REINVOICED' end as status,
+       b.l_inv as replacement_invoice_no, b.l_date as replacement_invoice_date,
+       r.po_number_raw as replacement_po_number_raw,
+       rt.items as replacement_items, rt.qty as replacement_qty, rt.value as replacement_value,
+       b.l_date - x.invoice_date as days_to_replacement,
+       b.link_rule, b.items_common, round(b.qty_similarity, 3) as qty_similarity,
+       -- one step along a chain: the next cancelled invoice that went to the same replacement, else it
+       case when b.l_inv is not null then
+         coalesce(lead(x.invoice_no) over (partition by b.l_inv order by x.invoice_date, x.invoice_no), b.l_inv)
+       end as next_invoice_no
+  from h x
+  left join best b on b.c_inv = x.invoice_no
+  left join h r on r.invoice_no = b.l_inv
+  left join lateral (select count(*) as items, sum(invoiced_qty) as qty, sum(invoiced_value) as value
+                       from public.o2c_invoice_lines where invoice_no = x.invoice_no) ct on true
+  left join lateral (select count(*) as items, sum(invoiced_qty) as qty, sum(invoiced_value) as value
+                       from public.o2c_invoice_lines where invoice_no = b.l_inv) rt on b.l_inv is not null
+ where x.cancellation_kind is not null;
+
+comment on view warehouse.o2c_invoice_replacements is
+  'One row per CANCELLED FY27 invoice (BC Cancel/Correct or an INC credit memo) and the LIVE invoice raised against the same PO in its place, if any. Migration 169.';
+
 create or replace view warehouse.o2c_bridge as
 with inc as (
   select cm.invoice_no,
          string_agg(distinct cm.credit_memo_no, ', ' order by cm.credit_memo_no) as inc_cm_nos
-  from public.o2c_credit_memos cm
-  where coalesce(cm.reason_code, '') = 'INC' and cm.invoice_no is not null
-  group by cm.invoice_no
+    from public.o2c_credit_memos cm
+   where coalesce(cm.reason_code, '') = 'INC' and cm.invoice_no is not null
+   group by cm.invoice_no
+),
+rep as materialized (
+  select cancelled_invoice_no, cancelled_invoice_date, replacement_invoice_no, po_number
+    from warehouse.o2c_invoice_replacements
+   where replacement_invoice_no is not null
+),
+rep_live as (   -- per replacement: what it replaced, and the PO it was raised for
+  select replacement_invoice_no as invoice_no,
+         string_agg(cancelled_invoice_no, ', ' order by cancelled_invoice_date, cancelled_invoice_no) as replaces_invoice_no,
+         (array_agg(po_number order by cancelled_invoice_date, cancelled_invoice_no))[1] as original_po_number
+    from rep group by replacement_invoice_no
+),
+moved as materialized (   -- a GRN on a cancelled line moves when the replacement's line for that item has none
+  select r.cancelled_invoice_no, r.replacement_invoice_no, cb.erp_item_no
+    from rep r
+    join public.o2c_bridge cb on cb.invoice_no = r.cancelled_invoice_no and cb.grn_qty is not null
+    join public.o2c_bridge rb on rb.invoice_no = r.replacement_invoice_no and rb.erp_item_no = cb.erp_item_no and rb.grn_qty is null
+),
+carry as (
+  select m.replacement_invoice_no as invoice_no, m.erp_item_no,
+         string_agg(distinct m.cancelled_invoice_no, ', ')                    as grn_carried_from,
+         string_agg(distinct cb.grn_feed, ', ')                               as grn_feed,
+         string_agg(distinct cb.grn_nos, ', ')                                as grn_nos,
+         max(cb.grn_date)                                                     as grn_date,
+         sum(cb.grn_qty)                                                      as grn_qty,
+         sum(cb.grn_rejected_qty)                                             as grn_rejected_qty,
+         string_agg(distinct cb.grn_reject_reason, ', ')                      as grn_reject_reason,
+         sum(cb.grn_duplicate_rows)::bigint                                   as grn_duplicate_rows,
+         min(cb.grn_match_method)                                             as grn_match_method
+    from moved m
+    join public.o2c_bridge cb on cb.invoice_no = m.cancelled_invoice_no and cb.erp_item_no = m.erp_item_no
+   group by m.replacement_invoice_no, m.erp_item_no
 )
-select b.po_number, b.po_number_raw, b.po_suffixed,
-       coalesce(l.platform, b.platform) as platform,
+select coalesce(rl.original_po_number, b.po_number)                          as po_number,
+       b.po_number_raw,
+       b.po_suffixed or coalesce(rl.original_po_number <> b.po_number, false) as po_suffixed,
+       coalesce(l.platform, b.platform)                                    as platform,
        b.customer_no, b.customer_name, b.customer_search_name, b.po_invoice_pattern,
        b.ship_to_code, b.ship_to_name, b.warehouse_code, b.so_no,
        b.invoice_no, b.invoice_date,
-       case when b.invoice_status = 'CANCELLED' or inc.invoice_no is not null then 'CANCELLED' else 'LIVE' end as invoice_status,
-       b.cancellation_cm_no, b.replacement_invoice_no, b.replaces_invoice_no,
+       case when b.invoice_status = 'CANCELLED' or inc.invoice_no is not null
+            then 'CANCELLED' else 'LIVE' end                               as invoice_status,
+       b.cancellation_cm_no,
+       cr.replacement_invoice_no,
+       rl.replaces_invoice_no,
        b.erp_item_no, b.item_name, b.item_category, b.po_qty, b.invoiced_qty, b.unit_price, b.invoiced_value,
-       b.grn_feed, b.grn_nos, b.grn_date, b.grn_qty, b.grn_rejected_qty, b.grn_reject_reason, b.grn_duplicate_rows,
-       b.grn_match_method,
-       case when inc.invoice_no is not null then 'CANCELLED_INVOICE' else b.grn_coverage end as grn_coverage,
-       case when inc.invoice_no is not null then null::numeric else b.short_qty end as short_qty,
-       case when inc.invoice_no is not null then null::numeric else b.excess_qty end as excess_qty,
-       case when inc.invoice_no is not null then null::numeric else b.short_value end as short_value,
+       case when cy.invoice_no is not null then cy.grn_feed when mv.erp_item_no is not null then null else b.grn_feed end as grn_feed,
+       case when cy.invoice_no is not null then cy.grn_nos  when mv.erp_item_no is not null then null else b.grn_nos  end as grn_nos,
+       case when cy.invoice_no is not null then cy.grn_date when mv.erp_item_no is not null then null else b.grn_date end as grn_date,
+       case when cy.invoice_no is not null then cy.grn_qty  when mv.erp_item_no is not null then null else b.grn_qty  end as grn_qty,
+       case when cy.invoice_no is not null then cy.grn_rejected_qty  when mv.erp_item_no is not null then null else b.grn_rejected_qty  end as grn_rejected_qty,
+       case when cy.invoice_no is not null then cy.grn_reject_reason when mv.erp_item_no is not null then null else b.grn_reject_reason end as grn_reject_reason,
+       case when cy.invoice_no is not null then cy.grn_duplicate_rows when mv.erp_item_no is not null then null else b.grn_duplicate_rows end as grn_duplicate_rows,
+       case when cy.invoice_no is not null then cy.grn_match_method  when mv.erp_item_no is not null then null else b.grn_match_method  end as grn_match_method,
+       case when inc.invoice_no is not null then 'CANCELLED_INVOICE'
+            when cy.invoice_no is not null then 'ITEM_QTY'
+            else b.grn_coverage end                                        as grn_coverage,
+       case when inc.invoice_no is not null then null::numeric
+            when cy.invoice_no is not null then greatest(b.invoiced_qty - cy.grn_qty, 0)
+            else b.short_qty end                                           as short_qty,
+       case when inc.invoice_no is not null then null::numeric
+            when cy.invoice_no is not null then greatest(cy.grn_qty - b.invoiced_qty, 0)
+            else b.excess_qty end                                          as excess_qty,
+       case when inc.invoice_no is not null then null::numeric
+            when cy.invoice_no is not null then round(greatest(b.invoiced_qty - cy.grn_qty, 0) * b.unit_price, 2)
+            else b.short_value end                                         as short_value,
        b.shgrn_cm_nos, b.shgrn_cm_qty, b.shgrn_cm_value,
-       case when inc.invoice_no is not null then 'INVOICE_CANCELLED' else b.credit_status end as credit_status,
+       case when inc.invoice_no is not null then 'INVOICE_CANCELLED'
+            -- the matview's ITEM_QTY branch, on the moved quantity (shgrn_cm_nos is set whenever the
+            -- invoice carries any short-GRN memo, which is the matview's invoice-level test)
+            when cy.invoice_no is not null then
+                 case when cy.grn_qty >= b.invoiced_qty then case when b.shgrn_cm_qty > 0 then 'CREDITED_WITHOUT_SHORTAGE' else 'GRN_FULL' end
+                      when coalesce(b.shgrn_cm_qty, 0) >= b.invoiced_qty - cy.grn_qty then 'SHORT_CREDITED'
+                      when coalesce(b.shgrn_cm_qty, 0) > 0 then 'SHORT_PARTIALLY_CREDITED'
+                      when b.shgrn_cm_nos is not null then 'SHORT_CREDITED_AT_INVOICE_LEVEL'
+                      else 'SHORT_CREDIT_PENDING' end
+            else b.credit_status end                                       as credit_status,
        case when b.invoice_status = 'CANCELLED' then 'BC_CANCELLED'
-            when inc.invoice_no is not null    then 'INC_MEMO' end as cancellation_kind,
-       coalesce(b.cancellation_cm_no, inc.inc_cm_nos) as cancellation_memo_no
+            when inc.invoice_no is not null    then 'INC_MEMO' end         as cancellation_kind,
+       coalesce(b.cancellation_cm_no, inc.inc_cm_nos)                      as cancellation_memo_no,
+       cy.grn_carried_from,
+       mv.replacement_invoice_no                                           as grn_moved_to
 from public.o2c_bridge b
 left join warehouse.channel_map_locations l
-       on l.customer_no = b.customer_no and l.ship_to_code = b.ship_to_code
-left join inc on inc.invoice_no = b.invoice_no;
+  on l.customer_no = b.customer_no and l.ship_to_code = b.ship_to_code
+left join inc on inc.invoice_no = b.invoice_no
+left join rep cr on cr.cancelled_invoice_no = b.invoice_no
+left join rep_live rl on rl.invoice_no = b.invoice_no
+left join carry cy on cy.invoice_no = b.invoice_no and cy.erp_item_no = b.erp_item_no
+left join moved mv on mv.cancelled_invoice_no = b.invoice_no and mv.erp_item_no = b.erp_item_no;
+
 create or replace view warehouse.o2c_invoices as
-select po_number, po_number_raw, po_suffixed, platform, customer_no, customer_name, customer_search_name, po_invoice_pattern, ship_to_code, ship_to_name, warehouse_code, so_no,
-       invoice_no, invoice_date, invoice_status, cancellation_cm_no, replacement_invoice_no, replaces_invoice_no,
-       count(*) as item_lines, sum(po_qty) as po_qty, sum(invoiced_qty) as invoiced_qty, sum(invoiced_value) as invoiced_value,
-       max(grn_feed) as grn_feed, max(grn_nos) as grn_nos, max(grn_date) as grn_date, sum(grn_qty) as grn_qty, sum(short_qty) as short_qty, sum(excess_qty) as excess_qty, sum(short_value) as short_value,
-       count(*) filter (where grn_coverage = 'ITEM_NOT_IN_GRN') as lines_not_in_grn,
-       min(grn_coverage) as grn_coverage, max(shgrn_cm_nos) as shgrn_cm_nos, sum(shgrn_cm_qty) as shgrn_cm_qty, sum(shgrn_cm_value) as shgrn_cm_value,
+select po_number,
+       po_number_raw,
+       po_suffixed,
+       platform,
+       customer_no,
+       customer_name,
+       customer_search_name,
+       po_invoice_pattern,
+       ship_to_code,
+       ship_to_name,
+       warehouse_code,
+       so_no,
+       invoice_no,
+       invoice_date,
+       invoice_status,
+       cancellation_cm_no,
+       replacement_invoice_no,
+       replaces_invoice_no,
+       count(*)                                                     as item_lines,
+       sum(po_qty)                                                  as po_qty,
+       sum(invoiced_qty)                                            as invoiced_qty,
+       sum(invoiced_value)                                          as invoiced_value,
+       max(grn_feed)                                                as grn_feed,
+       max(grn_nos)                                                 as grn_nos,
+       max(grn_date)                                                as grn_date,
+       sum(grn_qty)                                                 as grn_qty,
+       sum(short_qty)                                               as short_qty,
+       sum(excess_qty)                                              as excess_qty,
+       sum(short_value)                                             as short_value,
+       count(*) filter (where grn_coverage = 'ITEM_NOT_IN_GRN')     as lines_not_in_grn,
+       min(grn_coverage)                                            as grn_coverage,
+       max(shgrn_cm_nos)                                            as shgrn_cm_nos,
+       sum(shgrn_cm_qty)                                            as shgrn_cm_qty,
+       sum(shgrn_cm_value)                                          as shgrn_cm_value,
        case when bool_or(invoice_status = 'CANCELLED') then 'INVOICE_CANCELLED'
             when bool_or(credit_status = 'SHORT_CREDIT_PENDING') then 'SHORT_CREDIT_PENDING'
             when bool_or(credit_status = 'NOT_IN_GRN_CREDIT_PENDING') then 'NOT_IN_GRN_CREDIT_PENDING'
@@ -458,12 +664,17 @@ select po_number, po_number_raw, po_suffixed, platform, customer_no, customer_na
             when bool_or(credit_status = 'CREDITED_NO_GRN_VISIBILITY') then 'CREDITED_NO_GRN_VISIBILITY'
             when bool_and(credit_status in ('GRN_FULL', 'CREDITED_WITHOUT_SHORTAGE')) then 'GRN_FULL'
             when bool_or(credit_status = 'GRN_FULL') then 'PARTLY_VISIBLE_GRN_FULL'
-            else 'GRN_NOT_AVAILABLE' end as credit_status,
-       cancellation_kind, cancellation_memo_no
+            else 'GRN_NOT_AVAILABLE' end                            as credit_status,
+       cancellation_kind,
+       cancellation_memo_no,
+       string_agg(distinct grn_carried_from, ', ')                  as grn_carried_from,
+       string_agg(distinct grn_moved_to, ', ')                      as grn_moved_to
 from warehouse.o2c_bridge
-group by po_number, po_number_raw, po_suffixed, platform, customer_no, customer_name, customer_search_name, po_invoice_pattern, ship_to_code, ship_to_name, warehouse_code, so_no,
+group by po_number, po_number_raw, po_suffixed, platform, customer_no, customer_name, customer_search_name,
+         po_invoice_pattern, ship_to_code, ship_to_name, warehouse_code, so_no,
          invoice_no, invoice_date, invoice_status, cancellation_cm_no, replacement_invoice_no, replaces_invoice_no,
          cancellation_kind, cancellation_memo_no;
+
 -- Birbal migration 033 (2026-09-09): a cancelled invoice must never be counted or listed
 -- anywhere, so these two LIVE-only views are the surface Birbal actually queries; the
 -- unfiltered ones above stay for cancellation/re-invoicing questions only. Recreate them
@@ -475,13 +686,22 @@ create or replace view warehouse.o2c_invoices_live as
 select * from warehouse.o2c_invoices where invoice_status = 'LIVE';
 create or replace view warehouse.o2c_credit_memos as select * from public.o2c_credit_memos;
 create or replace view warehouse.o2c_grn_lines as
-select feed, platform, po_number, invoice_ref_raw, invoice_no, match_method, grn_no, grn_date, feed_item_code, erp_item_no, received_qty, ordered_qty, rejected_qty, reject_reason, source_file
-from public.o2c_grn_matched;
+select g.feed, g.platform, g.po_number, g.invoice_ref_raw, g.invoice_no, g.match_method, g.grn_no, g.grn_date,
+       g.feed_item_code, g.erp_item_no, g.received_qty, g.ordered_qty, g.rejected_qty, g.reject_reason, g.source_file,
+       coalesce(mv.replacement_invoice_no, g.invoice_no) as effective_invoice_no
+from public.o2c_grn_matched g
+left join (
+  select r.cancelled_invoice_no, r.replacement_invoice_no, cb.erp_item_no
+    from warehouse.o2c_invoice_replacements r
+    join public.o2c_bridge cb on cb.invoice_no = r.cancelled_invoice_no and cb.grn_qty is not null
+    join public.o2c_bridge rb on rb.invoice_no = r.replacement_invoice_no and rb.erp_item_no = cb.erp_item_no and rb.grn_qty is null
+) mv on mv.cancelled_invoice_no = g.invoice_no and mv.erp_item_no = g.erp_item_no;
+
 create or replace view warehouse.ref_customer_invoicing as select * from public.ref_customer_invoicing;
 create or replace view warehouse.zepto_grn as select * from public.zepto_grn;
 create or replace view warehouse.amazon_grn as select * from public.amazon_grn;
 grant select on warehouse.zepto_grn, warehouse.amazon_grn to birbal_scope_df78b2a571ce4041b7b1db77c72cb69e;
-grant select on warehouse.o2c_bridge, warehouse.o2c_invoices, warehouse.o2c_bridge_live, warehouse.o2c_invoices_live, warehouse.o2c_credit_memos, warehouse.o2c_grn_lines, warehouse.ref_customer_invoicing to birbal_scope_df78b2a571ce4041b7b1db77c72cb69e;
+grant select on warehouse.o2c_invoice_replacements, warehouse.o2c_bridge, warehouse.o2c_invoices, warehouse.o2c_bridge_live, warehouse.o2c_invoices_live, warehouse.o2c_credit_memos, warehouse.o2c_grn_lines, warehouse.ref_customer_invoicing to birbal_scope_df78b2a571ce4041b7b1db77c72cb69e;
 grant select on public.o2c_bridge, public.o2c_credit_memos, public.o2c_grn_matched, public.ref_customer_invoicing to birbal_scope_df78b2a571ce4041b7b1db77c72cb69e;
 -- Supabase's default privileges hand every new object in public to anon/authenticated (the keys that ship in
 -- browsers). Tables are protected by an empty RLS policy set; materialized views cannot have RLS, so the grant
