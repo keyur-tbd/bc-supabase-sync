@@ -54,3 +54,9 @@ set doc_md = doc_md
   || E'\n\neffective_invoice_no (migration 169): the invoice this GRN row counts against in o2c_bridge -- invoice_no, except where the feed matched a CANCELLED invoice that was re-invoiced, in which case the receipt moved to the live re-invoice (see o2c_invoice_replacements).'
 where table_name = 'o2c_grn_lines'
   and doc_md not like '%effective_invoice_no (migration 169)%';
+-- 183 (2026-10-16): the bridge shows the billed item code; product_item_no is the folded product key
+update warehouse.warehouse_meta
+set doc_md = doc_md
+  || E'\n\nITEM CODES (migration 183): erp_item_no / item_name are the code BILLED on the invoice line. Breads are billed FG/00xx from WH/0007 (Ahmedabad bakes) and TG/00xx ("O ..." names) from every other warehouse; Love Cake FG/0137 and Donut Cake FG/0143 are FG everywhere. product_item_no is the same product folded through item_rename_map (FG and TG of one bread share it): join PO lines, the register, POD sheets or memos on product_item_no, and group by it for any per-product number across warehouses.'
+where table_name in ('o2c_bridge', 'o2c_bridge_live')
+  and doc_md not like '%ITEM CODES (migration 183)%';
