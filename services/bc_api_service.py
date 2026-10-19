@@ -51,7 +51,18 @@ _TRANSIENT_MARKERS = (
     "rebalanced your resources",
     "service_unavailable",
     "operation could not be completed",
+    # 409 while an admin installs/updates an extension; BC closes every open
+    # page and the same URL works again once the deployment settles:
+    #   409 {"error":{"code":"Unknown","message":"An administrator changed one
+    #   or more extensions in the application, so the page that you were
+    #   working on had to be closed."}}   (G/L fetch, 2026-10-18 19:20 UTC)
+    "changed one or more extensions",
+    "had to be closed",
 )
+
+# An extension deployment takes minutes, not seconds: give those retries room.
+_EXTENSION_CHANGE_MARKER = "changed one or more extensions"
+_EXTENSION_CHANGE_RETRY_AFTER = 60.0
 
 
 def _looks_transient(body: str) -> bool:
@@ -186,11 +197,15 @@ class BCApiService:
         #   have happened because we rebalanced your resources ..."}}
         # That killed a run mid-page on 2026-09-02 after 16 minutes of work.
         # Classify on the body, not just the code, or the sync gives up on
-        # faults that would have succeeded on the next attempt.
-        if resp.status_code == 400 and _looks_transient(resp.text):
+        # faults that would have succeeded on the next attempt. The same goes
+        # for the 409 BC sends while an administrator deploys an extension
+        # (2026-10-18: one G/L page, 10,000 rows in, failed the whole run).
+        if resp.status_code in (400, 409) and _looks_transient(resp.text):
+            extension_change = _EXTENSION_CHANGE_MARKER in (resp.text or "").lower()
             raise RetryableHTTPError(
                 f"BC API returned a transient fault as {resp.status_code}",
                 status_code=resp.status_code,
+                retry_after=_EXTENSION_CHANGE_RETRY_AFTER if extension_change else None,
             )
 
         if resp.status_code != 200:
