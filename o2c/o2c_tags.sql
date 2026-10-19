@@ -14,8 +14,8 @@ update public.ref_customer_invoicing set
 where customer_no = 'C00356' and not reviewed;
 
 update public.ref_customer_invoicing set
-    grn_feed = 'flipkart_cb_grn / flipkart_ppr_grn / fatema_grn / slveggies_grn',
-    grn_match_rule = 'PO number matched across every Flipkart Minutes entity (GRN documents arrive under Flipkart''s name while the ERP invoices the fulfilment partner); feeds hold only a few rows as of Sep 2026',
+    grn_feed = 'flipkart_quick_grn / flipkart_cb_grn / flipkart_ppr_grn / fatema_grn / slveggies_grn',
+    grn_match_rule = 'flipkart_quick_grn (Flipkart Minutes portal PO report, FLIPKART QUICK tab of sheet 1IjwfjZg..., loader sheet_grn_loader, 3-hourly since 2026-10-16) by PO + FSN, CLOSED / CANCELLED PO lines only; its FLS... POs are invoiced on C00048. The mailed partner GRNs (flipkart_cb_grn, flipkart_ppr_grn; fatema_grn and slveggies_grn have never received a file) by PO number across every Flipkart Minutes entity',
     updated_at = now()
 where customer_no in ('C00048', 'C00198', 'C00213', 'C00347', 'C00408', 'C00409', 'C00410', 'C00521', 'C00542', 'C00483') and not reviewed;
 
