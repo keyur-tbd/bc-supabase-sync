@@ -13,11 +13,16 @@ update public.ref_customer_invoicing set
     updated_at = now()
 where customer_no = 'C00356' and not reviewed;
 
+-- 2026-10-19 (Keyur: "there is not Flipkart, everything is Flipkart Minutes"): the whole family is platform 'Flipkart Quick' --
+-- Flipkart India (C00048), Mulyam and every fulfilment partner warehouse.channel_map tags so (Birbal migration 185) -- and
+-- o2c_sync_customer_ref() keeps the platform in step with channel_map, so the family is addressed by platform, not by code.
 update public.ref_customer_invoicing set
     grn_feed = 'flipkart_quick_grn / flipkart_cb_grn / flipkart_ppr_grn / fatema_grn / slveggies_grn',
-    grn_match_rule = 'flipkart_quick_grn (Flipkart Minutes portal PO report, FLIPKART QUICK tab of sheet 1IjwfjZg..., loader sheet_grn_loader, 3-hourly since 2026-10-16) by PO + FSN, CLOSED / CANCELLED PO lines only; its FLS... POs are invoiced on C00048. The mailed partner GRNs (flipkart_cb_grn, flipkart_ppr_grn; fatema_grn and slveggies_grn have never received a file) by PO number across every Flipkart Minutes entity',
+    grn_match_rule = 'flipkart_quick_grn (Flipkart Minutes portal PO report, FLIPKART QUICK tab of sheet 1IjwfjZg..., loader sheet_grn_loader, 3-hourly since 2026-10-16) by PO + FSN, CLOSED / CANCELLED PO lines only; its FLS... POs are invoiced on C00048 FLIPKART INDIA. The partners'' own GRN documents (flipkart_cb_grn = Cropbasket, flipkart_ppr_grn = PRR; fatema_grn and slveggies_grn have never received a file) by PO number across every Flipkart Minutes entity (channel_map platform Flipkart Quick)',
     updated_at = now()
-where customer_no in ('C00048', 'C00198', 'C00213', 'C00347', 'C00408', 'C00409', 'C00410', 'C00521', 'C00542', 'C00483') and not reviewed;
+where platform = 'Flipkart Quick' and not reviewed
+  and (grn_feed is distinct from 'flipkart_quick_grn / flipkart_cb_grn / flipkart_ppr_grn / fatema_grn / slveggies_grn'
+       or grn_match_rule is null or grn_match_rule not like '%channel_map platform Flipkart Quick%');
 
 update public.ref_customer_invoicing set
     grn_match_rule = 'zepto_grn (Google Sheet downloaded from the Zepto portal; loader sheet_grn_loader, pending sheet access) by PO number',

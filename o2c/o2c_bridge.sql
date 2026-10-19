@@ -105,17 +105,22 @@ with raw as (
     select 'bb_net_grn', g.id, 'BigBasket', array['C00005'], g.pono, g.invoiceno, g.grnno, g.invoicedate::date, g.skucode::text, 'BigBasket', g.quantity, null, null, null, g.source_file
     from public.bb_net_grn g
     union all
-    -- Flipkart Minutes: GRN documents arrive under Flipkart's name while the ERP invoices the fulfilment partner (63IDEAS/Ninjacart, PRR, Fatema, Cropbasket, Mulyam, SL Veggies, Shreyash), so every feed is matched on PO number across the whole family
-    select 'flipkart_cb_grn', g.id, 'Flipkart', array['C00048', 'C00198', 'C00213', 'C00347', 'C00408', 'C00409', 'C00410', 'C00521', 'C00542', 'C00483'], g.po_number, null, null, g.expected_delivery_date::date, g.item_description, 'Flipkart', g.grn_quantity, g.po_quantity, null, null, g.source_file
+    -- Flipkart Minutes = platform 'Flipkart Quick' (Keyur, 2026-10-19: "there is not Flipkart, everything is Flipkart Minutes").
+    -- GRN documents arrive under Flipkart's name while the ERP invoices Flipkart India itself (C00048) or a fulfilment partner
+    -- (63IDEAS/Ninjacart, PRR, Fatema, Cropbasket, Mulyam, SL Veggies, Shri Balaji, Agromol, Shreyash), so every feed is matched on
+    -- PO number across the whole family. The family is whoever Birbal's warehouse.channel_map tags 'Flipkart Quick' (its FLIPKART
+    -- search-name rule plus channel_map_overrides, Birbal migration 185): a new partner needs an override row there, nothing here.
+    -- Item codes map through ref_platform_item_map platform 'Flipkart Quick' (FSNs); the two description-only feeds map nothing.
+    select 'flipkart_cb_grn', g.id, 'Flipkart Quick', array(select customer_no from warehouse.channel_map where platform = 'Flipkart Quick'), g.po_number, null, null, g.expected_delivery_date::date, g.item_description, 'Flipkart Quick', g.grn_quantity, g.po_quantity, null, null, g.source_file
     from public.flipkart_cb_grn g
     union all
-    select 'flipkart_ppr_grn', g.id, 'Flipkart', array['C00048', 'C00198', 'C00213', 'C00347', 'C00408', 'C00409', 'C00410', 'C00521', 'C00542', 'C00483'], null, coalesce(g.supplier_invoice_number, g.invoice_number), null, g.invoice_date::date, g.description_of_goods, 'Flipkart', g.quantity, null, null, null, g.source_file
+    select 'flipkart_ppr_grn', g.id, 'Flipkart Quick', array(select customer_no from warehouse.channel_map where platform = 'Flipkart Quick'), null, coalesce(g.supplier_invoice_number, g.invoice_number), null, g.invoice_date::date, g.description_of_goods, 'Flipkart Quick', g.quantity, null, null, null, g.source_file
     from public.flipkart_ppr_grn g
     union all
-    select 'fatema_grn', g.id, 'Flipkart', array['C00048', 'C00198', 'C00213', 'C00347', 'C00408', 'C00409', 'C00410', 'C00521', 'C00542', 'C00483'], g.po_number, null, g.bill_no, g.bill_date::date, coalesce(g.fsn_no, g.item_code), 'Flipkart', g.quantity, null, null, null, g.source_file
+    select 'fatema_grn', g.id, 'Flipkart Quick', array(select customer_no from warehouse.channel_map where platform = 'Flipkart Quick'), g.po_number, null, g.bill_no, g.bill_date::date, coalesce(g.fsn_no, g.item_code), 'Flipkart Quick', g.quantity, null, null, null, g.source_file
     from public.fatema_grn g
     union all
-    select 'slveggies_grn', g.id, 'Flipkart', array['C00048', 'C00198', 'C00213', 'C00347', 'C00408', 'C00409', 'C00410', 'C00521', 'C00542', 'C00483'], g.po_number, g.invoice_number, g.bill_number, g.bill_date::date, g.fsn_number, 'Flipkart', coalesce(g.grn_quantity, g.received_quantity), g.indent_quantity, g.return_quantity, null, g.source_file
+    select 'slveggies_grn', g.id, 'Flipkart Quick', array(select customer_no from warehouse.channel_map where platform = 'Flipkart Quick'), g.po_number, g.invoice_number, g.bill_number, g.bill_date::date, g.fsn_number, 'Flipkart Quick', coalesce(g.grn_quantity, g.received_quantity), g.indent_quantity, g.return_quantity, null, g.source_file
     from public.slveggies_grn g
     union all
     -- Zepto: portal PO report pasted into a Google Sheet (sheet_grn_loader). One row per PO x SKU; the GRN quantity is only evidence once the PO has closed
@@ -134,7 +139,7 @@ with raw as (
     -- (sheet_grn_loader, 2026-10-16). One row per PO x FSN; the FLS... PO is our External_Document_No on C00048. Only
     -- CLOSED / CANCELLED lines are final: an open PO (APPROVED, DORMANT) is left out so its invoice stays "GRN pending"
     -- instead of reading as short. A CANCELLED line received nothing.
-    select 'flipkart_quick_grn', g.id, 'Flipkart', array['C00048', 'C00198', 'C00213', 'C00347', 'C00408', 'C00409', 'C00410', 'C00521', 'C00542', 'C00483'], g.po_id, null, null, null, g.product_id, 'Flipkart Quick',
+    select 'flipkart_quick_grn', g.id, 'Flipkart Quick', array(select customer_no from warehouse.channel_map where platform = 'Flipkart Quick'), g.po_id, null, null, null, g.product_id, 'Flipkart Quick',
            coalesce(g.received_quantity, 0), g.ordered_quantity, nullif(g.rejected_quantity, 0),
            case when g.po_item_status = 'CANCELLED' then 'po cancelled' when coalesce(g.rejected_quantity, 0) > 0 then 'rejected' end, g.source_file
     from public.flipkart_quick_grn g
@@ -351,6 +356,17 @@ create index on public.o2c_bridge (credit_status);
 create or replace function public.o2c_refresh() returns text language plpgsql security definer as $$
 declare t0 timestamptz := clock_timestamp();
 begin
+    -- 2026-10-19 (o2c_customer_ref.sql): ref_customer_invoicing follows the ERP card and channel_map -- a customer that
+    -- invoices without a row gets one, erp_channel is kept current, non-reviewed rows follow a platform change. First,
+    -- so o2c_invoice_hdr below refreshes with the rows in place. Its absence or failure must not fail the refresh.
+    begin
+        perform public.o2c_sync_customer_ref();
+    exception
+        when undefined_function then
+            raise warning 'o2c_sync_customer_ref() not present (o2c/o2c_customer_ref.sql not applied); skipped';
+        when others then
+            raise warning 'o2c_sync_customer_ref failed: %', sqlerrm;
+    end;
     -- CONCURRENTLY where a unique index exists so Birbal's reads are never blocked; the two intermediates have
     -- no natural unique key and are refreshed in place (they are read only through o2c_grn_lines).
     refresh materialized view concurrently public.o2c_invoice_hdr;
