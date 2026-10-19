@@ -129,6 +129,16 @@ with raw as (
            case when g.invoice_status <> 'Unconfirmed' then g.received_quantity end, g.invoice_quantity, g.shortage_quantity,
            case when g.invoice_status = 'Unconfirmed' then 'not yet received (Unconfirmed)' when coalesce(g.has_shortage, '') <> '' then 'shortage: ' || g.has_shortage end, g.source_file
     from public.amazon_grn g
+    union all
+    -- Flipkart Minutes (hyperlocal) seller-portal PO report, pasted into the FLIPKART QUICK tab of the Amazon workbook
+    -- (sheet_grn_loader, 2026-10-16). One row per PO x FSN; the FLS... PO is our External_Document_No on C00048. Only
+    -- CLOSED / CANCELLED lines are final: an open PO (APPROVED, DORMANT) is left out so its invoice stays "GRN pending"
+    -- instead of reading as short. A CANCELLED line received nothing.
+    select 'flipkart_quick_grn', g.id, 'Flipkart', array['C00048', 'C00198', 'C00213', 'C00347', 'C00408', 'C00409', 'C00410', 'C00521', 'C00542', 'C00483'], g.po_id, null, null, null, g.product_id, 'Flipkart Quick',
+           coalesce(g.received_quantity, 0), g.ordered_quantity, nullif(g.rejected_quantity, 0),
+           case when g.po_item_status = 'CANCELLED' then 'po cancelled' when coalesce(g.rejected_quantity, 0) > 0 then 'rejected' end, g.source_file
+    from public.flipkart_quick_grn g
+    where g.po_item_status in ('CLOSED', 'CANCELLED')
 ),
 split as (
     select r.*, upper(regexp_replace(replace(coalesce(r.po, ''), U&'\FFFD', ''), '[^A-Za-z0-9]+$', '')) as po_number,   -- upper: Cropbasket's portal writes 682026.dbe.po.10, the ERP 682026.DBE.PO.10
