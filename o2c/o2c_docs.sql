@@ -60,3 +60,14 @@ set doc_md = doc_md
   || E'\n\nITEM CODES (migration 183): erp_item_no / item_name are the code BILLED on the invoice line. Breads are billed FG/00xx from WH/0007 (Ahmedabad bakes) and TG/00xx ("O ..." names) from every other warehouse; Love Cake FG/0137 and Donut Cake FG/0143 are FG everywhere. product_item_no is the same product folded through item_rename_map (FG and TG of one bread share it): join PO lines, the register, POD sheets or memos on product_item_no, and group by it for any per-product number across warehouses.'
 where table_name in ('o2c_bridge', 'o2c_bridge_live')
   and doc_md not like '%ITEM CODES (migration 183)%';
+-- Birbal migration 197 (2026-10-21): zero-quantity invoice lines are NOT_SHIPPED, not ITEM_NOT_IN_GRN / SHORT_CREDITED
+update warehouse.warehouse_meta
+set doc_md = doc_md
+  || E'\n\nNOT_SHIPPED (migration 197): an invoice line with quantity 0 -- the PO item rides on the invoice but nothing was shipped -- is grn_coverage NOT_SHIPPED and credit_status NOT_SHIPPED, with NULL short_qty / excess_qty / short_value, unless the GRN lists the item or a short-GRN memo names it. It is neither received, short nor GRN pending: leave it out of any receipt or shortage count. A zero line the GRN does list stays ITEM_QTY.'
+where table_name in ('o2c_bridge', 'o2c_bridge_live')
+  and doc_md not like '%NOT_SHIPPED (migration 197)%';
+update warehouse.warehouse_meta
+set doc_md = doc_md
+  || E'\n\nNOT_SHIPPED (migration 197): an invoice''s grn_coverage and credit_status ignore its zero-quantity (NOT_SHIPPED) lines, so an invoice whose shipped lines were all received in full is GRN_FULL; an invoice with nothing but zero lines is NOT_SHIPPED.'
+where table_name in ('o2c_invoices', 'o2c_invoices_live')
+  and doc_md not like '%NOT_SHIPPED (migration 197)%';
