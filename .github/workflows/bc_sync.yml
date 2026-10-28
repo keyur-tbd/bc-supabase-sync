@@ -2,9 +2,12 @@ name: Business Central -> Supabase Sync
 
 on:
   schedule:
-    # Every 2 hours. Adjust to taste — incremental syncs are cheap since
-    # they only pull records changed since the last successful run.
-    - cron: "58 */2 * * *"
+    # FALLBACK ONLY. The real schedule is pg_cron (o2c/pg_cron_bc_sync_dispatch.sql),
+    # which dispatches this workflow 11 times a day: GitHub honoured "every 2 hours"
+    # about four times a day (2026-10-28: 07:31 and 14:51 IST, nothing between).
+    # This tick keeps the sync alive if the dispatch token expires; a run it starts
+    # while another is going queues behind it (concurrency below).
+    - cron: "50 5,17 * * *"
   workflow_dispatch:
     inputs:
       mode:
