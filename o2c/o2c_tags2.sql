@@ -1,7 +1,7 @@
 -- Zepto and Amazon GRN now loaded from the portal sheets (sheet_grn_loader), 2026-09-06
 update public.ref_customer_invoicing set
     grn_feed = 'zepto_grn',
-    grn_match_rule = 'PO + ITEM against zepto_grn (Zepto portal PO report pasted into a Google Sheet, loaded daily by sheet_grn_loader). GRN quantity counts once the PO status is COMPLETED / GRN_DONE / EXPIRED / CANCELLED, or on a PENDING_GRN / ASN_CREATED line once Zepto has booked a GRN quantity.',
+    grn_match_rule = 'PO + ITEM against zepto_grn (Zepto portal PO report pasted into a Google Sheet, loaded daily by sheet_grn_loader). GRN quantity counts once the PO status is COMPLETED / GRN_DONE / EXPIRED / CANCELLED, or on a PENDING_GRN / ASN_CREATED line once Zepto has booked a GRN quantity. An invoice whose Zepto lines are all still open with nothing booked is GRN pending, not short.',
     note = 'GRN sheet: docs.google.com/spreadsheets/d/1Txws1Qan9QVyR3qJTlup5BadQ9KwI6qk84KQb8bMbEQ (shared with instamart@thebakersdozen.in)',
     updated_at = now()
 where customer_no in (select customer_no from warehouse.channel_map where platform = 'Zepto') and not reviewed;

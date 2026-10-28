@@ -25,7 +25,7 @@ where platform = 'Flipkart Quick' and not reviewed
        or grn_match_rule is null or grn_match_rule not like '%channel_map platform Flipkart Quick%');
 
 update public.ref_customer_invoicing set
-    grn_match_rule = 'PO + ITEM against zepto_grn (Zepto portal PO report pasted into a Google Sheet, loaded 3-hourly by sheet_grn_loader). GRN quantity counts once the PO status is COMPLETED / GRN_DONE / EXPIRED / CANCELLED, or on a PENDING_GRN / ASN_CREATED line once Zepto has booked a GRN quantity.',
+    grn_match_rule = 'PO + ITEM against zepto_grn (Zepto portal PO report pasted into a Google Sheet, loaded 3-hourly by sheet_grn_loader). GRN quantity counts once the PO status is COMPLETED / GRN_DONE / EXPIRED / CANCELLED, or on a PENDING_GRN / ASN_CREATED line once Zepto has booked a GRN quantity. An invoice whose Zepto lines are all still open with nothing booked is GRN pending, not short.',
     note = 'GRN sheet: docs.google.com/spreadsheets/d/1Txws1Qan9QVyR3qJTlup5BadQ9KwI6qk84KQb8bMbEQ',
     updated_at = now()
 where customer_no in ('C00155', 'C00043') and not reviewed;

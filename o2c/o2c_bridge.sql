@@ -294,7 +294,9 @@ grn_inv as (   -- invoice-level presence, plus whether the invoice's GRN rows ar
     select m.invoice_no, string_agg(distinct m.feed, ', ') as grn_feed, string_agg(distinct m.grn_no, ', ') filter (where m.grn_no is not null) as grn_nos, max(m.grn_date) as grn_date, min(m.match_method) as grn_match_method,
            count(*) filter (where m.feed_item_code is not null and m.erp_item_no is not null) as item_rows,
            count(*) filter (where m.feed_item_code is not null and m.erp_item_no is null) as unmapped_rows,
-           count(*) filter (where m.feed_item_code is null) as header_only_rows
+           count(*) filter (where m.feed_item_code is null) as header_only_rows,
+           count(*) as grn_rows,
+           count(*) filter (where m.received_qty is null and (m.reject_reason like 'grn pending (%' or m.reject_reason like 'not yet received%')) as pending_rows
     from public.o2c_grn_matched m where m.invoice_no is not null group by 1
 ),
 shcm as (
@@ -344,6 +346,9 @@ left join shcm s on s.invoice_no = h.invoice_no and s.erp_item_no = l.erp_item_n
 left join shcm_inv si on si.invoice_no = h.invoice_no
 cross join lateral (select case when h.cancelled then 'CANCELLED_INVOICE'
                                 when g.grn_qty is not null then 'ITEM_QTY'
+                                -- every GRN row of the invoice is still open with nothing booked (Zepto PENDING_* / ASN_CREATED,
+                                -- Amazon Unconfirmed): GRN pending, not short (2026-10-28, Keyur, on 27BLR-09792 in the claims ledger)
+                                when gi.invoice_no is not null and gi.pending_rows = gi.grn_rows then 'NOT_FOUND'
                                 when gi.invoice_no is not null and gi.item_rows > 0 and gi.unmapped_rows = 0 and gi.header_only_rows = 0 then 'ITEM_NOT_IN_GRN'
                                 when gi.invoice_no is not null then 'INVOICE_ONLY'
                                 when h.expected_grn_feed is null then 'NO_FEED'
