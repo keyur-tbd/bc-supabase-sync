@@ -123,10 +123,13 @@ with raw as (
     select 'slveggies_grn', g.id, 'Flipkart Quick', array(select customer_no from warehouse.channel_map where platform = 'Flipkart Quick'), g.po_number, g.invoice_number, g.bill_number, g.bill_date::date, g.fsn_number, 'Flipkart Quick', coalesce(g.grn_quantity, g.received_quantity), g.indent_quantity, g.return_quantity, null, g.source_file
     from public.slveggies_grn g
     union all
-    -- Zepto: portal PO report pasted into a Google Sheet (sheet_grn_loader). One row per PO x SKU; the GRN quantity is only evidence once the PO has closed
+    -- Zepto: portal PO report pasted into a Google Sheet (sheet_grn_loader). One row per PO x SKU. A closed line's GRN quantity is final;
+    -- an open line (PENDING_GRN / ASN_CREATED) counts once Zepto has booked a GRN quantity on it (2026-10-28, Keyur: 300 lines on
+    -- March-April POs still read PENDING_GRN with the full quantity booked and no short credit raised, yet showed as fully short)
     select 'zepto_grn', g.id, 'Zepto', array(select customer_no from warehouse.channel_map where platform = 'Zepto'), g.po_no, null, null, null, lower(g.sku), 'Zepto',
-           case when g.status in ('COMPLETED', 'GRN_DONE', 'EXPIRED', 'CANCELLED') then g.grn_quantity end, g.qty, null,
-           case when g.status in ('PENDING_ACKNOWLEDGEMENT', 'ASN_CREATED', 'PENDING_GRN') then 'grn pending (' || g.status || ')' when g.status in ('EXPIRED', 'CANCELLED') then lower(g.status) end, g.source_file
+           case when g.status in ('COMPLETED', 'GRN_DONE', 'EXPIRED', 'CANCELLED') or g.grn_quantity > 0 then g.grn_quantity end, g.qty, null,
+           case when g.status in ('PENDING_ACKNOWLEDGEMENT', 'ASN_CREATED', 'PENDING_GRN') and g.grn_quantity > 0 then 'grn booked, portal status ' || g.status
+                when g.status in ('PENDING_ACKNOWLEDGEMENT', 'ASN_CREATED', 'PENDING_GRN') then 'grn pending (' || g.status || ')' when g.status in ('EXPIRED', 'CANCELLED') then lower(g.status) end, g.source_file
     from public.zepto_grn g
     union all
     -- Amazon Vendor Central receipts pasted into a Google Sheet (sheet_grn_loader). One row per PO x ASIN; Unconfirmed POs have not been received yet
