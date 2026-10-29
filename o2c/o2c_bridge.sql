@@ -188,18 +188,34 @@ create index on public.o2c_grn_lines (feed, grn_row_id);
 --     our numbers, so the 5-digit-core guess is the weakest evidence in the cascade and a PO
 --     that resolves to a real invoice beats it.
 -- Priority 2 (invoice_core+po) already required PO equality; this is the same test on 3.
+--
+-- Two more guards (2026-10-29, Keyur: Instamart MBDPO32707 / our 27BLR-09889 read short on every line).
+--   * Invoice numbers restart every financial year, and the 5-digit core drops the year: last year's GRN
+--     CHN000024576 (CHNPO13468, quoting 26BLR-09889, Oct 2025) landed on our 27BLR-09889 (Oct 2026), which
+--     then read ITEM_NOT_IN_GRN on all 18 lines (Rs 2.27 L, real short Rs 7.6 K). Priorities 2 and 3 now
+--     refuse a GRN dated more than 3 days BEFORE the invoice -- a receipt cannot precede the bill. Measured:
+--     198 invoices (Instamart 69, Hyperpure 59, BB alert 35, Milkbasket 32, BB Net 2, NB 1) carried an
+--     earlier year's GRN this way, ~Rs 7.7 L of false short and ~64k units of false excess.
+--   * Priority 1 had no customer test. Instamart keyed 27BLR-09009 (our Namdhari invoice) on GRN
+--     MBD000057456 for MBDPO32707, so Namdhari's invoice took Instamart's receipt. An exact number now
+--     needs the invoice's customer to be one of the feed's customers OR the feed's PO to agree (Metro and
+--     Reliance Cash & Carry ride in reliance_grn and carry the same PO; the PO test keeps them). The
+--     2026-09-09 finding above still stands: within the feed's own customers the number beats the PO.
 create materialized view public.o2c_grn_matched as
 select g.*, r.invoice_no, r.match_method
 from public.o2c_grn_lines g
 left join lateral (
     select c.invoice_no, c.match_method from (
         select h.invoice_no, 1 as pri, 'invoice_exact' as match_method from public.o2c_invoice_hdr h where g.cand_norm <> '' and h.inv_norm = g.cand_norm
+           and (h.customer_no = any(g.customer_nos) or (g.po_number <> '' and h.po_number_u = g.po_number))
         union all
         select h.invoice_no, 2, 'invoice_core+po' from public.o2c_invoice_hdr h
          where g.cand_num5 is not null and h.num5 = g.cand_num5 and (g.cand_branch is null or h.branch = g.cand_branch) and g.po_number <> '' and h.po_number_u = g.po_number and h.customer_no = any(g.customer_nos)
+           and (g.grn_date is null or g.grn_date >= h.invoice_date - 3)
         union all
         select h.invoice_no, 3, 'invoice_core' from public.o2c_invoice_hdr h
          where g.cand_num5 is not null and g.cand_branch is not null and h.num5 = g.cand_num5 and h.branch = g.cand_branch and h.customer_no = any(g.customer_nos)
+           and (g.grn_date is null or g.grn_date >= h.invoice_date - 3)
            and (select count(*) from public.o2c_invoice_hdr x where x.num5 = g.cand_num5 and x.branch = g.cand_branch and x.customer_no = any(g.customer_nos)) = 1
            and (g.po_number = '' or h.po_number_u = g.po_number
                 or not exists (select 1 from public.o2c_invoice_hdr x
