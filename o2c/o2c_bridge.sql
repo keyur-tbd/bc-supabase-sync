@@ -132,10 +132,16 @@ with raw as (
                 when g.status in ('PENDING_ACKNOWLEDGEMENT', 'ASN_CREATED', 'PENDING_GRN') then 'grn pending (' || g.status || ')' when g.status in ('EXPIRED', 'CANCELLED') then lower(g.status) end, g.source_file
     from public.zepto_grn g
     union all
-    -- Amazon Vendor Central receipts pasted into a Google Sheet (sheet_grn_loader). One row per PO x ASIN; Unconfirmed POs have not been received yet
+    -- Amazon Vendor Central receipts pasted into a Google Sheet (sheet_grn_loader). One row per PO x ASIN. Only a Closed PO's
+    -- received quantity is final; an open PO (Unconfirmed, Confirmed) counts once Amazon has received something on the line.
+    -- Until 2026-10-31 a Confirmed line with 0 received counted as 0 received: 13 POs invoiced 29-30 Oct read fully short
+    -- (6,696 units, Rs 6.0 L) the day after billing. Closed with 0 received stays short: Amazon closed the PO with nothing
+    -- booked, and most such lines carry an SHGRN memo.
     select 'amazon_grn', g.id, 'Amazon', array(select customer_no from warehouse.channel_map where platform = 'Amazon'), g.po_number, nullif(g.invoice_number, ''), null, g.invoice_date, g.asin, 'Amazon',
-           case when g.invoice_status <> 'Unconfirmed' then g.received_quantity end, g.invoice_quantity, g.shortage_quantity,
-           case when g.invoice_status = 'Unconfirmed' then 'not yet received (Unconfirmed)' when coalesce(g.has_shortage, '') <> '' then 'shortage: ' || g.has_shortage end, g.source_file
+           case when g.invoice_status = 'Closed' or g.received_quantity > 0 then g.received_quantity end, g.invoice_quantity, g.shortage_quantity,
+           case when g.invoice_status <> 'Closed' and g.received_quantity > 0 then 'grn booked, portal status ' || g.invoice_status
+                when g.invoice_status <> 'Closed' then 'not yet received (' || coalesce(g.invoice_status, 'no status') || ')'
+                when coalesce(g.has_shortage, '') <> '' then 'shortage: ' || g.has_shortage end, g.source_file
     from public.amazon_grn g
     union all
     -- Flipkart Minutes (hyperlocal) seller-portal PO report, pasted into the FLIPKART QUICK tab of the Amazon workbook
