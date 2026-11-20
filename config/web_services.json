@@ -429,9 +429,9 @@
       "enabled": true
     },
     {
-      "_NOTE": "ADDED 2026-08-31 for the Sales Register GST Detail: it is the ONLY source of the report's COGS column. Value Entry (table 5802) keyed Document_No + Document_Line_No, which is what links a cost back to a posted sales invoice/credit memo line - bc_item_ledger_entries cannot, because its Document_No is the SHIPMENT number (27SSHIP-...), not the invoice number. COGS per line = -SUM(Cost_Amount_Actual) over its value entries (verified to the paisa against the April-2026 report export). static_filter keeps the purchase/output/consumption/adjustment entries out: 714k sales rows vs 1.17M all rows for FY 2026-27. Scoped to 2026-04-01 like the rest of the register.",
+      "_NOTE": "ADDED 2026-08-31 for the Sales Register GST Detail: it is the ONLY source of the report's COGS column. Value Entry (table 5802) keyed Document_No + Document_Line_No, which is what links a cost back to a posted sales invoice/credit memo line - bc_item_ledger_entries cannot, because its Document_No is the SHIPMENT number (27SSHIP-...), not the invoice number. COGS per line = -SUM(Cost_Amount_Actual) over its value entries (verified to the paisa against the April-2026 report export). static_filter keeps the purchase/output/consumption/adjustment entries out: 714k sales rows vs 1.17M all rows for FY 2026-27. Scoped to 2026-04-01 like the rest of the register. WIDENED 2026-11-20 to purchase entries too (Birbal PO-to-payment / PTP report 50129): a purchase invoice's Direct Cost entry carries Item_Ledger_Entry_No = the GRN's item-ledger entry, the ERP's own GRN line -> invoice line link (Document_No = 27PI..., Document_Line_No = the invoice line). ~58k purchase rows for FY 2026-27. Every reader filters Item_Ledger_Entry_Type (the sales register: = 'Sale'). Purchase history from 2026-04-01 was loaded once with scripts/backfill_value_entries_window.py.",
       "name": "Value_Entries_Excel",
-      "display_name": "Value Entries (sales only)",
+      "display_name": "Value Entries (sales + purchases)",
       "object_type": "Page",
       "object_id": 5802,
       "table_name": "bc_value_entries",
@@ -443,7 +443,72 @@
       "chunk": "monthly",
       "lookback_days": 7,
       "sync_start_date": "2026-04-01",
-      "static_filter": "Item_Ledger_Entry_Type eq 'Sale'",
+      "static_filter": "(Item_Ledger_Entry_Type eq 'Sale' or Item_Ledger_Entry_Type eq 'Purchase')",
+      "enabled": true
+    },
+    {
+      "_NOTE": "ADDED 2026-11-20 for Birbal's PO-to-payment view (replica of the PTP report, BC report 50129): purchase ORDER and draft INVOICE headers from the Purchase Header (OData page 'purchaseDocuments', camelCase). Orders give PO date / status (BC keeps every PO since 2024, 6.6k); draft invoices give 'Pending Approval' status. No timestamp -> full refresh; full_refresh_prune deletes drafts that were posted (BC deletes the draft row).",
+      "name": "purchaseDocuments",
+      "display_name": "Purchase Headers (orders + draft invoices)",
+      "object_type": "Page",
+      "object_id": 0,
+      "table_name": "bc_purchase_documents",
+      "primary_key": [
+        "documentType",
+        "number"
+      ],
+      "sync_strategy": "full_refresh",
+      "static_filter": "(documentType eq 'Order' or documentType eq 'Invoice')",
+      "full_refresh_prune": true,
+      "enabled": true
+    },
+    {
+      "_NOTE": "ADDED 2026-11-20 with purchaseDocuments: the Purchase Line rows of those orders and draft invoices (PO Qty / PO Value / received / invoiced per PO line; a draft invoice line's receiptNumber + receiptLineNumber is the exact GRN line it bills). ~19k rows. Full refresh + prune.",
+      "name": "purchaseDocumentLines",
+      "display_name": "Purchase Lines (orders + draft invoices)",
+      "object_type": "Page",
+      "object_id": 0,
+      "table_name": "bc_purchase_document_lines",
+      "primary_key": [
+        "documentType",
+        "documentNumber",
+        "lineNumber"
+      ],
+      "sync_strategy": "full_refresh",
+      "static_filter": "(documentType eq 'Order' or documentType eq 'Invoice')",
+      "full_refresh_prune": true,
+      "enabled": true
+    },
+    {
+      "_NOTE": "ADDED 2026-11-20: posted purchase receipt (GRN, 27PR-...) headers, API v2.0: vendor, posting date, orderNumber. Needed for the service / G-L / fixed-asset GRN lines, which never reach the item ledger. ~30k. Backfill windows on postingDate (a date: the backfill filter is date-typed, and BC answers 500 to lastModifiedDateTime compared with a bare date); incremental on lastModifiedDateTime. max_page_size 1000: a 5000-row page of this entity returns HTTP 500 (2026-11-20).",
+      "name": "purchaseReceipts",
+      "display_name": "Posted Purchase Receipts (API v2.0)",
+      "api": "v2.0",
+      "object_type": "API",
+      "object_id": 0,
+      "table_name": "bc_api_purchase_receipts",
+      "primary_key": "id",
+      "sync_strategy": "date",
+      "history_field": "postingDate",
+      "incremental_field": "lastModifiedDateTime",
+      "incremental_is_datetime": true,
+      "chunk": "monthly",
+      "lookback_days": 2,
+      "sync_start_date": "2024-04-01",
+      "enabled": true,
+      "max_page_size": 1000
+    },
+    {
+      "_NOTE": "ADDED 2026-11-20: posted purchase receipt lines that are NOT items (G/L account services, fixed assets, charges): the GRN lines the item ledger never sees (~10% of the PTP report's GRN lines). documentId -> bc_api_purchase_receipts.id. Item lines are left out (the item ledger has them). No timestamp -> full refresh (~19k narrow rows).",
+      "name": "purchaseReceiptLines",
+      "display_name": "Posted Purchase Receipt Lines, non-item (API v2.0)",
+      "api": "v2.0",
+      "object_type": "API",
+      "object_id": 0,
+      "table_name": "bc_api_purchase_receipt_lines",
+      "primary_key": "id",
+      "sync_strategy": "full_refresh",
+      "static_filter": "lineType ne 'Item'",
       "enabled": true
     }
   ]

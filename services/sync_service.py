@@ -183,6 +183,7 @@ class SyncService:
                 processed, failed = self._run_full_refresh(
                     state, stats, name, table_name, primary_key,
                     quarantine_invalid=quarantine_invalid,
+                    prune=bool(service.get("full_refresh_prune", False)),
                 )
             elif do_backfill:
                 processed, failed = self._run_backfill(
@@ -525,22 +526,35 @@ class SyncService:
         return total_p, total_f
 
     def _run_full_refresh(self, state, stats, name, table_name, primary_key,
-                          quarantine_invalid: bool = True) -> tuple[int, int]:
+                          quarantine_invalid: bool = True, prune: bool = False) -> tuple[int, int]:
         """For tables with no usable timestamp and no monotonic key: re-pull
         the ENTIRE table every run (no $filter) and upsert. Correct for both
         append-only and mutable reference tables; cost scales with table
         size, so it suits small/medium tables. Still resumable mid-pull via
-        the stored nextLink."""
+        the stored nextLink.
+
+        prune (config "full_refresh_prune": true): after a pull that started at
+        the first page and wrote every row, delete the rows BC no longer
+        returns (drafts that were posted, deleted documents). A resumed or
+        partly failed pull never prunes: its key set is incomplete."""
         resume_url = state.resume_url if state.has_incomplete_run else None
         logger.info(f"[{name}] Full-refresh (no incremental key) — pulling entire table and upserting.")
+        pk = [primary_key] if isinstance(primary_key, str) else list(primary_key)
+        seen: set[tuple] = set()
         total_processed = 0
         total_failed = 0
         for records, next_url in self._api.fetch_pages(name, odata_filter=None, resume_url=resume_url):
+            if prune:
+                seen.update(tuple("" if r.get(c) is None else str(r.get(c)) for c in pk) for r in records)
             p, f = self._process_page(name, table_name, primary_key, None, records, stats,
                                       quarantine_invalid=quarantine_invalid)
             total_processed += p
             total_failed += f
             self._db.save_resume_point(name, next_url, total_processed)
+        if prune and resume_url is None and total_failed == 0:
+            gone = self._db.delete_rows_not_in(table_name, primary_key, seen)
+            if gone:
+                logger.info(f"[{name}] Pruned {gone} row(s) BC no longer returns.")
         return total_processed, total_failed
 
     # ------------------------------------------------------------------ #

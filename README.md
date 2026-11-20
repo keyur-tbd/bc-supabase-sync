@@ -34,8 +34,16 @@ BC):
 | `Posted_Sales_Credit_Memo_ExcelSalesCrMemoLines` (FY 2026-27 series only) | `bc_posted_sales_cr_memo_lines` | series_key | — | `Document_No` |
 | `Detailed_GST_Ledger_Entry_Excel` | `bc_detailed_gst_ledger_entries` | date | `Posting_Date` | `Posting_Date` |
 | `Customer_Card_Excel` | `bc_customer_card` | full_refresh | — | — |
-| `Value_Entries_Excel` (sales entries only, `static_filter`) | `bc_value_entries` | date | `Posting_Date` | `Posting_Date` |
+| `Value_Entries_Excel` (sales + purchase entries, `static_filter`; purchases since 2026-11-20) | `bc_value_entries` | date | `Posting_Date` | `Posting_Date` |
+| `purchaseDocuments` (Purchase Header: orders + draft invoices, `static_filter`, prune) | `bc_purchase_documents` | full_refresh | — | — |
+| `purchaseDocumentLines` (Purchase Line: orders + draft invoices, `static_filter`, prune) | `bc_purchase_document_lines` | full_refresh | — | — |
+| `purchaseReceipts` (**API v2.0**, posted GRN headers) | `bc_api_purchase_receipts` | date | `postingDate` | `lastModifiedDateTime` (datetime) |
+| `purchaseReceiptLines` (**API v2.0**, non-item GRN lines only, `static_filter`) | `bc_api_purchase_receipt_lines` | full_refresh | — | — |
 | `Item_Card_Excel` | `bc_item_card` | full_refresh | — | — |
+
+> `full_refresh_prune: true` (purchaseDocuments / purchaseDocumentLines) deletes the rows BC no longer
+> returns after a complete, error-free pull from the first page (a posted draft invoice disappears from the
+> Purchase Header); a resumed or partly failed pull, or one returning under half the rows held, never prunes.
 
 > Sales Return Order is an open (un-posted) document, so it has no posting
 > date — it is chunked/incremented on `Document_Date` instead. GL uses

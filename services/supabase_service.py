@@ -684,6 +684,34 @@ class SupabaseService:
         with self._engine.connect() as conn:
             return {r[0] for r in conn.execute(sql).fetchall()}
 
+    def delete_rows_not_in(self, table_name: str, primary_key, keys: set[tuple]) -> int:
+        """Delete every row whose key is NOT in `keys` (each key a tuple of text values, in
+        primary_key order). For full-refresh services whose source deletes rows: a draft
+        purchase invoice disappears from BC's Purchase Header when it is posted, and an
+        upsert-only copy would keep it for ever. Refuses when `keys` is empty or covers
+        less than half of the rows held (a short pull must never empty the table).
+        Returns the number of rows deleted."""
+        pk = [primary_key] if isinstance(primary_key, str) else list(primary_key)
+        cols = [normalize_column_name(c) for c in pk]
+        tbl = qualified_table(self._schema, table_name)
+        if not keys or not set(cols) <= self._existing_columns(table_name):
+            return 0
+        with self._engine.begin() as conn:
+            held = conn.execute(text(f"SELECT count(*) FROM {tbl}")).scalar() or 0
+            if len(keys) < 0.5 * held:
+                logger.warning(f"[{table_name}] Prune skipped: the pull returned {len(keys)} keys "
+                               f"against {held} rows held.")
+                return 0
+            conn.execute(text("CREATE TEMP TABLE _bc_keep ("
+                              + ", ".join(f"k{i} text" for i in range(len(cols))) + ") ON COMMIT DROP"))
+            conn.execute(text("INSERT INTO _bc_keep VALUES ("
+                              + ", ".join(f":k{i}" for i in range(len(cols))) + ")"),
+                         [{f"k{i}": v for i, v in enumerate(k)} for k in keys])
+            cond = " AND ".join(f"t.{quote_ident(c)}::text = k.k{i}" for i, c in enumerate(cols))
+            res = conn.execute(text(f"DELETE FROM {tbl} t WHERE NOT EXISTS "
+                                    f"(SELECT 1 FROM _bc_keep k WHERE {cond})"))
+            return res.rowcount or 0
+
     # ---------- upserts ----------
 
     def upsert_rows(
