@@ -9,8 +9,10 @@ name: Order-to-cash bridge refresh
 # scheduled runs 4-5 hours late every day (the 09:00 run at 13:44-13:50 IST, the 18:00 one at
 # 22:06-22:19), while a manual run starts within seconds. This workflow stays for exactly that: run it
 # by hand from the Actions tab after a GRN backfill, or to refresh between beats.
-# select public.o2c_refresh() takes 12-22 minutes; the views with a unique index refresh CONCURRENTLY,
-# so Birbal's queries are not blocked while it runs.
+# The bridge (o2c_refresh_bridge, ~30 min by Nov 2026) and what is built off it (o2c_refresh_downstream:
+# feed_inventory + cogs_refresh) run as two psql commands, so two transactions: a failure in the second
+# cannot roll back the first. o2c_grn_lines / o2c_grn_matched refresh without CONCURRENTLY and block
+# readers of those two until the bridge commits.
 
 on:
   workflow_dispatch:
@@ -22,7 +24,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - name: Checkout repository (for the Supabase root certificate)
         uses: actions/checkout@v4
@@ -35,6 +37,7 @@ jobs:
           PGCONNECT_TIMEOUT: "30"
         run: |
           psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 \
-            -c "set statement_timeout = '1800000'" \
-            -c "select public.o2c_refresh()" \
+            -c "set statement_timeout = '3000000'" \
+            -c "select public.o2c_refresh_bridge()" \
+            -c "select public.o2c_refresh_downstream()" \
             -c "select (select max(invoice_date) from public.o2c_invoice_hdr) as bridge_max_invoice_date, (select count(*) from public.o2c_bridge) as bridge_lines"

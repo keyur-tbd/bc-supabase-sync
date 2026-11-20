@@ -8,7 +8,8 @@ to the short-GRN credit memos, one row per invoice x ERP item. Birbal reads them
 
 | file | what | when to run |
 |---|---|---|
-| `o2c_bridge.sql` | drops and rebuilds all six matviews, `o2c_refresh()`, the warehouse views and grants | only when the definitions change (6-10 min, by hand, as `postgres`) |
+| `o2c_bridge.sql` | drops and rebuilds all six matviews, the warehouse views and grants | only when the definitions change (6-10 min, by hand, as `postgres`) |
+| `o2c_refresh.sql` | `o2c_refresh_bridge()` (the six matviews + reversals + capping ledger), `o2c_refresh_downstream()` (feed_inventory + `cogs_refresh()`), `o2c_refresh()` (both, one transaction, hand runs only) and the per-step timing table `o2c_refresh_steps` | after `o2c_bridge.sql`, or alone when the refresh changes (seconds, no matview locks) |
 | `o2c_customer_ref.sql` | `ref_customer_invoicing.erp_channel` + `o2c_sync_customer_ref()`: the table follows the ERP card and `warehouse.channel_map` (customers that invoice without a row are added, non-reviewed rows follow a platform change, the ERP channel is kept current); `o2c_refresh()` calls it first | after `o2c_bridge.sql`, or alone when the rule changes |
 | `o2c_tags.sql`, `o2c_tags2.sql` | `ref_customer_invoicing` corrections (which GRN feed / matching rule per customer) | after `o2c_bridge.sql`, or alone when a customer's feed changes |
 | `o2c_docs.sql` | `warehouse.warehouse_meta` rows for the exposed views | after either of the above |
@@ -19,8 +20,11 @@ matviews Birbal is querying and takes minutes, so it stays a deliberate, hand-ru
 (then tags, then docs), or the equivalent from psycopg2 with the same timeout.
 
 Refreshing the data is a different thing and is scheduled **in the database**: `pg_cron_schedule.sql`
-has pg_cron call `select public.o2c_refresh()` at **09:00 and 14:00 IST** (since 2026-09-11; it was
-09:00 and 18:00 on GitHub Actions, which started those runs 4-5 hours late every day). Check runs with
+has pg_cron call `select public.o2c_refresh_bridge()` at **09:00 and 14:00 IST** (since 2026-09-11; it was
+09:00 and 18:00 on GitHub Actions, which started those runs 4-5 hours late every day). Birbal's
+`birbal_scm_follow_up()` (every 10 min) also runs the bridge after each BC sync, then the SCM board, the
+Order to Cash report and finally `o2c_refresh_downstream()`, one step per tick. Step durations:
+`select fn, step, round(avg(secs)) from public.o2c_refresh_steps where started_at > now() - interval '3 days' group by 1, 2 order by 3 desc`. Check runs with
 `select * from cron.job_run_details order by start_time desc limit 10`. `.github/workflows/o2c_refresh.yml`
 no longer has a schedule; run it by hand from the Actions tab after a GRN backfill or between beats.
 Birbal's fill-rate and sales-facts crons (its `vercel.json`) are timed off these two times.
