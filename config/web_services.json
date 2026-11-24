@@ -510,6 +510,56 @@
       "sync_strategy": "full_refresh",
       "static_filter": "lineType ne 'Item'",
       "enabled": true
+    },
+    {
+      "_NOTE": "ADDED 2026-11-24 for Birbal's Fixed Assets board (register + depreciation working, today built from Excel each month). Fixed Asset card (page 5600, published as Fixed_Asset): class / subclass / location / Blocked / Inactive plus the default depreciation book's posting group, method, starting date (= put-to-use date), book value and acquisition cost. ~700 rows -> full_refresh.",
+      "name": "Fixed_Asset",
+      "display_name": "Fixed Asset Card",
+      "object_type": "Page",
+      "object_id": 5600,
+      "table_name": "bc_fixed_asset_card",
+      "primary_key": "No",
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "_NOTE": "ADDED 2026-11-24 for the Fixed Assets board. FA Depreciation Books (page 5619): one row per asset x depreciation book (COMPANY / IT books), method, declining-balance %, starting / ending date. The page carries no disposal date or salvage value: disposals come from bc_fa_ledger_entries (FA_Posting_Type = Proceeds on Disposal). ~1,000 rows -> full_refresh.",
+      "name": "FA_Depreciation_Books",
+      "display_name": "FA Depreciation Books",
+      "object_type": "Page",
+      "object_id": 5619,
+      "table_name": "bc_fa_depreciation_book",
+      "primary_key": ["FA_No", "Depreciation_Book_Code"],
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "_NOTE": "ADDED 2026-11-24 for the Fixed Assets board. FA Ledger Entries (page 5604): acquisition cost / depreciation / disposal postings per asset and book, with Reversed. Only ~2,800 rows in all, so full_refresh rather than a Posting_Date lookback: a reversal flips Reversed on an entry of any age. Move to the date strategy if it ever passes ~50k rows.",
+      "name": "FA_Ledger_Entries",
+      "display_name": "FA Ledger Entries",
+      "object_type": "Page",
+      "object_id": 5604,
+      "table_name": "bc_fa_ledger_entries",
+      "primary_key": "Entry_No",
+      "sync_strategy": "full_refresh",
+      "enabled": true
+    },
+    {
+      "_NOTE": "ADDED 2026-11-24 for MSME interest: Detailed Vendor Ledg. Entries (page 574, published by Edit in Excel). The Application rows give the date and amount of each part payment against an invoice (Vendor_Ledger_Entry_No = the invoice's entry, Document_No = the applying payment); bc_vendor_ledger_entries only has the date an invoice finally closed. The page has no Applied_Vend_Ledger_Entry_No. ~85k rows from the 2024-03-31 opening balances, so loaded whole. Incremental on SystemModifiedAt, not Posting_Date: unapplying flips Unapplied on rows of any age.",
+      "name": "Detailed_Vendor_Ledger_Entries_Excel",
+      "display_name": "Detailed Vendor Ledger Entries",
+      "object_type": "Page",
+      "object_id": 574,
+      "table_name": "bc_detailed_vendor_ledger_entries",
+      "primary_key": "Entry_No",
+      "sync_strategy": "date",
+      "history_field": "Posting_Date",
+      "incremental_field": "SystemModifiedAt",
+      "incremental_is_datetime": true,
+      "chunk": "monthly",
+      "lookback_days": 2,
+      "sync_start_date": "2024-03-01",
+      "enabled": true
     }
   ]
 }

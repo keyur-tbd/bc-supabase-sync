@@ -40,6 +40,10 @@ BC):
 | `purchaseReceipts` (**API v2.0**, posted GRN headers) | `bc_api_purchase_receipts` | date | `postingDate` | `lastModifiedDateTime` (datetime) |
 | `purchaseReceiptLines` (**API v2.0**, non-item GRN lines only, `static_filter`) | `bc_api_purchase_receipt_lines` | full_refresh | — | — |
 | `Item_Card_Excel` | `bc_item_card` | full_refresh | — | — |
+| `Fixed_Asset` (Fixed Asset Card, page 5600, with the default depreciation book) | `bc_fixed_asset_card` | full_refresh | — | — |
+| `FA_Depreciation_Books` (page 5619, one row per asset x book) | `bc_fa_depreciation_book` | full_refresh | — | — |
+| `FA_Ledger_Entries` (page 5604, ~2.8k rows) | `bc_fa_ledger_entries` | full_refresh | — | — |
+| `Detailed_Vendor_Ledger_Entries_Excel` (page 574: part-payment applications for MSME interest) | `bc_detailed_vendor_ledger_entries` | date | `Posting_Date` | `SystemModifiedAt` (datetime) |
 
 > `full_refresh_prune: true` (purchaseDocuments / purchaseDocumentLines) deletes the rows BC no longer
 > returns after a complete, error-free pull from the first page (a posted draft invoice disappears from the
