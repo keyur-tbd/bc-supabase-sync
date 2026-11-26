@@ -560,6 +560,37 @@
       "lookback_days": 2,
       "sync_start_date": "2024-03-01",
       "enabled": true
+    },
+    {
+      "_NOTE": "ADDED 2026-11-26 for Birbal's GSTR-1: Posted Transfer Shipment headers (table 5744, page 5743, published by Edit in Excel). A stock transfer to another of our GSTINs (TRS27-...) is a B2B supply in table 4A, but until now it reached Birbal only through the GST ledger, which has its TAXED lines; the 0%-rated lines were in no synced table (Gujarat 4A short of the filed return by Rs 3.12 crore, Apr-Oct 2026). The header carries the e-invoice (IRN_Hash / Acknowledgement_No / E_Invoice_Status), which marks a transfer to another GSTIN apart from moves within one. Posted -> only the e-invoice / e-way bill fields change after posting, so a 40-day Posting_Date lookback re-reads them. ~2.3k headers for FY 2026-27.",
+      "name": "Posted_Transfer_Shipment_Excel",
+      "display_name": "Posted Transfer Shipment",
+      "object_type": "Page",
+      "object_id": 5743,
+      "table_name": "bc_posted_transfer_shipment",
+      "primary_key": "No",
+      "sync_strategy": "date",
+      "history_field": "Posting_Date",
+      "incremental_field": "Posting_Date",
+      "incremental_is_datetime": false,
+      "chunk": "monthly",
+      "lookback_days": 40,
+      "sync_start_date": "2026-04-01",
+      "enabled": true
+    },
+    {
+      "_NOTE": "ADDED 2026-11-26 for Birbal's GSTR-1: Posted Transfer Shipment lines (table 5745, the lines subpage of Posted_Transfer_Shipment_Excel): Item_No, Quantity, Amount (transfer value). The page carries no GST group / rate and GSTAmount_gDec is 0, so the exempt-rated part of a transfer = SUM(Amount) minus the GST ledger's base for that document (TRS27-001861: 7,08,912.81 = 6,62,992.81 at 5% + 45,920 at 0%). Posted -> immutable, no date field -> series_key above each series' stored max, series learned from the header table; min_date keeps only the FY 2026-27 (TRS27-) series.",
+      "name": "Posted_Transfer_Shipment_ExcelTransferShipmentLines",
+      "display_name": "Posted Transfer Shipment Lines",
+      "object_type": "Page",
+      "object_id": 5744,
+      "table_name": "bc_posted_transfer_shipment_lines",
+      "primary_key": ["Document_No", "Line_No"],
+      "sync_strategy": "series_key",
+      "enabled": true,
+      "series_key_field": "Document_No",
+      "series_separator": "-",
+      "series_source": {"table": "bc_posted_transfer_shipment", "column": "No", "date_column": "Posting_Date", "min_date": "2026-04-01"}
     }
   ]
 }

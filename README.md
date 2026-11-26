@@ -33,6 +33,8 @@ BC):
 | `Posted_Sales_Invoice_ExcelSalesInvLines` (FY 2026-27 series only) | `bc_posted_sales_invoice_lines` | series_key | — | `Document_No` |
 | `Posted_Sales_Credit_Memo_ExcelSalesCrMemoLines` (FY 2026-27 series only) | `bc_posted_sales_cr_memo_lines` | series_key | — | `Document_No` |
 | `Detailed_GST_Ledger_Entry_Excel` | `bc_detailed_gst_ledger_entries` | date | `Posting_Date` | `Posting_Date` |
+| `Posted_Transfer_Shipment_Excel` (TRS headers with e-invoice, from 2026-04-01; GSTR-1 transfers) | `bc_posted_transfer_shipment` | date | `Posting_Date` | `Posting_Date` (40-day lookback) |
+| `Posted_Transfer_Shipment_ExcelTransferShipmentLines` (FY 2026-27 series only; all lines incl. 0%-rated) | `bc_posted_transfer_shipment_lines` | series_key | — | `Document_No` |
 | `Customer_Card_Excel` | `bc_customer_card` | full_refresh | — | — |
 | `Value_Entries_Excel` (sales + purchase entries, `static_filter`; purchases since 2026-11-20) | `bc_value_entries` | date | `Posting_Date` | `Posting_Date` |
 | `purchaseDocuments` (Purchase Header: orders + draft invoices, `static_filter`, prune) | `bc_purchase_documents` | full_refresh | — | — |
@@ -1020,7 +1022,9 @@ the register:
 **Transfer Shipment rows are not produced.** The report prints them (5,477 of
 April's 74,671) but they carry no customer, no GST and no COGS, and the
 2026-08-28 decision was that the register is for P&L use. Adding them means a
-third UNION branch off a transfer-shipment page, which is not synced.
+third UNION branch off a transfer-shipment page. Since 2026-11-26 that page is
+synced (`bc_posted_transfer_shipment` + `_lines`, for Birbal's GSTR-1), so the
+branch is possible if the register ever needs it.
 
 ### Scoping the pull to one financial year
 
