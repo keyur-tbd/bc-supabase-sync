@@ -46,6 +46,7 @@ BC):
 | `FA_Depreciation_Books` (page 5619, one row per asset x book) | `bc_fa_depreciation_book` | full_refresh | — | — |
 | `FA_Ledger_Entries` (page 5604, ~2.8k rows) | `bc_fa_ledger_entries` | full_refresh | — | — |
 | `Detailed_Vendor_Ledger_Entries_Excel` (page 574: part-payment applications for MSME interest) | `bc_detailed_vendor_ledger_entries` | date | `Posting_Date` | `SystemModifiedAt` (datetime) |
+| `Detailed_Customer_Ledger_Entries_Excel` (page 573, Application rows only: which memos / invoices each receipt was applied to) | `bc_detailed_customer_ledger_entries` | date | `Posting_Date` | `Posting_Date` (45-day lookback) |
 
 > `full_refresh_prune: true` (purchaseDocuments / purchaseDocumentLines) deletes the rows BC no longer
 > returns after a complete, error-free pull from the first page (a posted draft invoice disappears from the

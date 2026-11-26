@@ -247,6 +247,24 @@
       "enabled": true
     },
     {
+      "_NOTE": "ADDED 2026-11-26 for Birbal's knock-off checks: Detailed Cust. Ledg. Entries (page 573, published by Edit in Excel). Application rows say which documents were applied together: Document_No = the APPLYING document (a receipt 27BRV..., or a memo applied from its own side), Cust_Ledger_Entry_No = the entry it closed (join bc_customer_ledger_entries.Entry_No). bc_customer_ledger_entries keeps only one Applied_Document_No per entry, which is why wrong-city memos on Big Basket receipts could not be seen. static_filter keeps Application rows only (419k since 2024-04 of 759k; Initial Entry rows repeat the ledger). Unapplying flips Unapplied / Unapplied_by_Entry_No on the OLD rows without moving a date and posts new Application rows (Unapplied = true) dated the unapply day; the page has no SystemModifiedAt, so a 45-day Posting_Date lookback re-reads recent flips and consumers should net amounts per (Cust_Ledger_Entry_No, Document_No) rather than trust the flag on old rows.",
+      "name": "Detailed_Customer_Ledger_Entries_Excel",
+      "display_name": "Detailed Customer Ledger Entries",
+      "object_type": "Page",
+      "object_id": 573,
+      "table_name": "bc_detailed_customer_ledger_entries",
+      "primary_key": "Entry_No",
+      "sync_strategy": "date",
+      "history_field": "Posting_Date",
+      "incremental_field": "Posting_Date",
+      "incremental_is_datetime": false,
+      "chunk": "monthly",
+      "lookback_days": 45,
+      "sync_start_date": "2024-04-01",
+      "static_filter": "Entry_Type eq 'Application'",
+      "enabled": true
+    },
+    {
       "_NOTE": "G/L Account Card (page 17). 637 rows, master data with Last_Date_Modified but tiny -> full_refresh.",
       "name": "G_L_Account_Card_Excel",
       "display_name": "G/L Account Card",
