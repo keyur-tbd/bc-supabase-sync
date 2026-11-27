@@ -26,17 +26,27 @@ with h as (
 cm as (
     select "Applies_to_Doc_No" as invoice_no, min("No") as cancellation_cm_no
     from public.bc_posted_sales_credit_memo where (coalesce("Corrective", false) or coalesce("Correction", false)) and "Applies_to_Doc_Type" = 'Invoice' group by 1
+),
+-- 2026-11-27 (Birbal 380): the replacement links as one self-join per customer x PO. They were two correlated
+-- sub-selects over h -- a scan of every invoice for each invoice, ~13 of the bridge's ~16 minutes. Same rule, same result.
+rl as (
+    select h.invoice_no,
+           min(r.invoice_no) filter (where not r.cancelled and r.invoice_date >= h.invoice_date) as replacement_invoice_no,
+           max(r.invoice_no) filter (where r.cancelled and r.invoice_date <= h.invoice_date) as replaces_invoice_no
+    from h join h r on r.customer_no = h.customer_no and r.po_number = h.po_number and r.invoice_no <> h.invoice_no
+    group by h.invoice_no
 )
 select h.*,
        upper(h.po_number) as po_number_u,
        h.po_number_raw <> h.po_number as po_suffixed,
        case when h.cancelled then 'CANCELLED' else 'LIVE' end as invoice_status,
        cm.cancellation_cm_no,
-       (select min(r.invoice_no) from h r where r.customer_no = h.customer_no and r.po_number = h.po_number and not r.cancelled and r.invoice_no <> h.invoice_no and r.invoice_date >= h.invoice_date) as replacement_invoice_no,
-       (select max(c.invoice_no) from h c where c.customer_no = h.customer_no and c.po_number = h.po_number and c.cancelled and c.invoice_no <> h.invoice_no and c.invoice_date <= h.invoice_date) as replaces_invoice_no,
+       rl.replacement_invoice_no,
+       rl.replaces_invoice_no,
        coalesce(rc.po_invoice_pattern, 'ONE_PO_ONE_INVOICE') as po_invoice_pattern, rc.platform, rc.search_name, rc.grn_feed as expected_grn_feed
 from h
 left join cm on cm.invoice_no = h.invoice_no
+left join rl on rl.invoice_no = h.invoice_no
 left join public.ref_customer_invoicing rc on rc.customer_no = h.customer_no;
 create unique index on public.o2c_invoice_hdr (invoice_no);
 create index on public.o2c_invoice_hdr (inv_norm);

@@ -14,7 +14,7 @@
 --                             matviews, register_reversals_refresh, rtv_capping_refresh (the last two are ~10 s each
 --                             and feed the GST-register readers). The pg_cron beats (pg_cron_schedule.sql) and
 --                             Birbal's follow-up call this.
---   o2c_refresh_downstream()  feed_inventory + cogs_refresh. Birbal's birbal_scm_follow_up() runs it as its own step
+--   o2c_refresh_downstream()  cogs_refresh (feed_inventory moved to Birbal's refresh chain, 382). Birbal's birbal_scm_follow_up() runs it as its own step
 --                             after the board and the report, in its own transaction, so a failure or timeout there
 --                             can no longer undo the bridge.
 --   o2c_refresh()             both, in one transaction, as before -- for a hand run / the GitHub workflow only.
@@ -140,17 +140,10 @@ declare
     t  timestamptz;
     r  text;
 begin
-    -- Birbal migration 037 (2026-09-09): the "what data exists" inventory (~4.5 min; it counts every warehouse
-    -- relation). Birbal answers "do you have X data" from warehouse.feed_inventory, so it must not go stale -- but a
-    -- probe failure must never fail the refresh, hence the exception block.
-    t := clock_timestamp();
-    begin
-        perform app.refresh_feed_inventory();
-        perform public.o2c_log_step(t0, 'downstream', 'refresh_feed_inventory', t);
-    exception when others then
-        raise warning 'feed_inventory refresh failed: %', sqlerrm;
-        perform public.o2c_log_step(t0, 'downstream', 'refresh_feed_inventory', t, false, sqlerrm);
-    end;
+    -- 2026-11-27 (Birbal 382): app.refresh_feed_inventory() (the "what data exists" inventory, Birbal 037) is no
+    -- longer run here. It runs every warehouse view in full and had grown to ~17 min, the largest step of the SCM
+    -- follow-up, holding the costed register below back each time; Birbal's refresh chain (step feed_inventory)
+    -- runs it after a downstream run, at most every 3 hours, when the database is quiet.
     -- Birbal migration 039 (2026-09-09) and later: the costed sales register (mv_sales_cogs), mv_mis_sales,
     -- mv_ads_campaign_month, mv_pnl_lines, the Primary board's net-sales reconcile and the Spends facts, all off the
     -- GST register. cogs_refresh() returns its own per-surface counts; they go in the note.
