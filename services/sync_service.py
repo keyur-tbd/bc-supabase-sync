@@ -487,7 +487,13 @@ class SyncService:
             prefix = _odata_str(s)
             odata_filter = f"startswith({field},{prefix})"
             if high:
-                odata_filter += f" and {field} gt {_odata_str(high)}"
+                # ge, not gt: re-read the highest stored document. A run that
+                # stops mid-page (disk guard, job timeout, a failed page) can
+                # leave that document with only its first lines, and with gt
+                # its tail was never fetched again (27BLR-07638 lost a Rs
+                # 3,733 line, 27CNMUM-10469 Rs 2,250; found 2026-11-27 from
+                # the GSTR-1). One document per series per run; upsert.
+                odata_filter += f" and {field} ge {_odata_str(high)}"
             for records, next_url in self._api.fetch_pages(
                 name, odata_filter=odata_filter, order_by=field
             ):
